@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>急上昇</h2>
+<p class="note">直近3日間に投稿された動画の再生数順です。</p>
+<div class="grid">
+  {% for v in hot %}
+  <a class="card" href="/watch/{{ v.id }}">
+    <div class="thumb">
+      <img loading="lazy" src="{{ v.thumb }}" alt="">
+      <span class="dur">{{ v.seconds|duration }}</span>
+    </div>
+    <div class="meta">
+      <div class="title">{{ v.title }}</div>
+      <div class="sub">{{ v.views|count }}回再生 · {{ v.start|date }}</div>
+    </div>
+  </a>
+  {% else %}
+  <p>取得できませんでした。少し待って再読み込みしてください。</p>
+  {% endfor %}
+</div>
+{% endblock %}
