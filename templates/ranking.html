@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}ランキング - ニコ動ビューア{% endblock %}
+{% block content %}
+<h2>ランキング</h2>
+<div class="chips">
+  {% for k, label in TERM_LABELS.items() %}
+  <a class="chip {% if k == term %}on{% endif %}" href="/ranking?term={{ k }}&genre={{ genre|urlencode }}">{{ label }}</a>
+  {% endfor %}
+</div>
+<div class="chips">
+  <a class="chip {% if not genre %}on{% endif %}" href="/ranking?term={{ term }}">全ジャンル</a>
+  {% for g in GENRES %}
+  <a class="chip {% if g == genre %}on{% endif %}" href="/ranking?term={{ term }}&genre={{ g|urlencode }}">{{ g }}</a>
+  {% endfor %}
+</div>
+<div class="grid">
+  {% for v in items %}
+  <a class="card" href="/watch/{{ v.id }}">
+    <div class="thumb">
+      <img loading="lazy" src="{{ v.thumb }}" alt="">
+      <span class="dur">{{ v.seconds|duration }}</span>
+      <span class="rank">{{ loop.index }}</span>
+    </div>
+    <div class="meta">
+      <div class="title">{{ v.title }}</div>
+      <div class="sub">{{ v.views|count }}回再生</div>
+    </div>
+  </a>
+  {% else %}
+  <p>取得できませんでした。</p>
+  {% endfor %}
+</div>
+{% endblock %}
