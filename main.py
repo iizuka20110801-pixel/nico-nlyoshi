@@ -1,4 +1,4 @@
-"""nico-nlyoshi — ニコょし"""
+"""nico-viewer-plus — ニコニコょし"""
 import asyncio
 import html as html_lib
 import json
@@ -19,6 +19,7 @@ API = "https://snapshot.search.nicovideo.jp/api/v2/snapshot/video/contents/searc
 WATCH = "https://www.nicovideo.jp/watch/{0}"
 EMBED = "https://embed.nicovideo.jp/watch/{0}"
 NVAPI = "https://nvapi.nicovideo.jp/v1/watch/{0}"
+HLS = "https://nvapi.nicovideo.jp/v1/watch/{0}/access-rights/hls"
 UA = "nico-viewer-plus/1.0 (personal project)"
 BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
@@ -54,9 +55,13 @@ async def lifespan(app: FastAPI):
                                 follow_redirects=True)
     _browser = httpx.AsyncClient(timeout=15.0, headers={
         "User-Agent": BROWSER_UA,
+        "Accept": "application/json, text/plain, */*",
         "Accept-Language": "ja-JP,ja;q=0.9",
         "X-Frontend-Id": "6",
         "X-Frontend-Version": "0",
+        "X-Client-Os-Type": "others",
+        "X-Request-With": "https://www.nicovideo.jp",
+        "Origin": "https://www.nicovideo.jp",
         "Referer": "https://www.nicovideo.jp/",
     }, follow_redirects=True)
     yield
@@ -293,8 +298,7 @@ async def fetch_comments(video_id: str) -> list[dict]:
         r = await _browser.post(
             f"{server}/v1/threads?_frontendId=6",
             json={"params": params, "threadKey": thread_key, "additionals": {}},
-            headers={"Content-Type": "application/json",
-                     "Origin": "https://www.nicovideo.jp"})
+            headers={"Content-Type": "application/json"})
         if r.status_code != 200:
             return []
         out = []
@@ -312,6 +316,51 @@ async def fetch_comments(video_id: str) -> list[dict]:
         return await cached(f"c:{video_id}", 600, run)
     except Exception:
         return []
+
+
+async def fetch_stream(video_id: str) -> dict:
+    """HLS の再生URLを取得（自前プレイヤー用）"""
+    nv = await nv_watch(video_id)
+    if not nv:
+        return {"error": "meta"}
+
+    domand = ((nv.get("media") or {}).get("domand") or {})
+    key = domand.get("accessRightKey")
+    if not key:
+        return {"error": "rights"}
+
+    videos = [v for v in (domand.get("videos") or []) if v.get("id")]
+    audios = [a for a in (domand.get("audios") or []) if a.get("id")]
+    if not videos:
+        return {"error": "quality"}
+
+    videos.sort(key=lambda v: v.get("height") or 0)
+    under = [v for v in videos if (v.get("height") or 0) <= 720]
+    video = (under or videos)[-1]
+    audios.sort(key=lambda a: a.get("bitRate") or 0)
+    audio = audios[-1] if audios else None
+
+    outputs = [[video["id"], audio["id"]]] if audio else [[video["id"]]]
+    track = ((nv.get("client") or {}).get("watchTrackId")
+             or "AAAAAAAAAA_" + str(int(time.time() * 1000)))
+
+    async def run():
+        r = await _browser.post(
+            HLS.format(video_id), params={"actionTrackId": track},
+            json={"outputs": outputs},
+            headers={"Content-Type": "application/json",
+                     "X-Access-Right-Key": key})
+        if r.status_code not in (200, 201):
+            return None
+        return ((r.json() or {}).get("data") or {}).get("contentUrl")
+
+    try:
+        url = await cached(f"h:{video_id}", 600, run)
+    except Exception:
+        url = None
+    if not url:
+        return {"error": "hls"}
+    return {"url": url}
 
 
 def remember(request: Request, video: dict) -> str:
@@ -387,6 +436,12 @@ async def watch_page(request: Request, video_id: str):
     resp.set_cookie("history", remember(request, video), max_age=60 * 60 * 24 * 90,
                     httponly=True, samesite="lax")
     return resp
+
+
+@app.get("/api/stream/{video_id}")
+async def api_stream(video_id: str):
+    cid = re.sub(r"[^A-Za-z0-9_]", "", video_id)
+    return JSONResponse(await fetch_stream(cid))
 
 
 @app.get("/api/comments/{video_id}")
