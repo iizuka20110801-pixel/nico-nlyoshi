@@ -1,18 +1,46 @@
 {% extends "base.html" %}
-{% block title %}{{ video.title }} - ニコ動ビューア{% endblock %}
+{% block title %}{{ video.title }} - ニコ動ビューア %}
 {% block content %}
+<style>
+.player{position:relative;width:100%;padding-top:56.25%;height:0;background:#000;
+  border-radius:10px;overflow:hidden;border:1px solid var(--line)}
+.player .poster{position:absolute;top:0;left:0;width:100%;height:100%;object-fit:cover;z-index:0}
+.player video{position:absolute;top:0;left:0;width:100%;height:100%;background:#000;z-index:1}
+.player iframe{position:absolute;top:0;left:0;width:100%;height:100%;border:0;z-index:1}
+.danmaku-layer{position:absolute;top:0;left:0;width:100%;height:100%;overflow:hidden;
+  pointer-events:none;z-index:3}
+.dm{position:absolute;white-space:nowrap;font-weight:800;color:#fff;line-height:1.2;
+  text-shadow:0 0 3px #000,0 0 3px #000,0 0 3px #000,1px 1px 2px #000;will-change:transform}
+.dmbox{display:flex;gap:10px;align-items:center;margin:10px 0 0;flex-wrap:wrap}
+.dmbox .chip{cursor:pointer;background:var(--panel)}
+.note.bad{color:#f88}
+#log{white-space:pre-wrap;font:11px/1.5 ui-monospace,monospace;color:var(--dim);
+  background:var(--panel);border:1px solid var(--line);border-radius:8px;
+  padding:8px;margin:10px 0 0;max-height:120px;overflow:auto}
+.vtitle{font-size:18px;margin:14px 0 6px}
+.vsub{display:flex;gap:14px;flex-wrap:wrap;color:var(--dim);font-size:13px}
+.tags{display:flex;gap:8px;flex-wrap:wrap;margin:14px 0}
+.tags a{background:var(--panel);border:1px solid var(--line);border-radius:999px;
+  padding:4px 10px;font-size:12px}
+</style>
+
 <div class="player" id="player">
   {% if video.thumb %}<img class="poster" id="poster" src="{{ video.thumb }}" alt="">{% endif %}
   <video id="vid" playsinline webkit-playsinline controls preload="metadata"
          {% if video.thumb %}poster="{{ video.thumb }}"{% endif %}></video>
   <div class="danmaku-layer" id="layer"></div>
 </div>
+
 <div class="dmbox">
   <button id="toggle" class="chip on">コメント ON</button>
   <span class="note" id="cstate">プレイヤー準備中…</span>
-  <a class="chip" id="openlink" href="https://www.nicovideo.jp/watch/{{ video.id }}"
-     target="_blank" rel="noopener">別タブで開く</a>
+  <a class="chip" href="{{ embed }}" target="_blank" rel="noopener">埋め込みで開く</a>
+  <a class="chip" href="https://www.nicovideo.jp/watch/{{ video.id }}"
+     target="_blank" rel="noopener">ニコニコ動画で開く</a>
 </div>
+
+<pre id="log"></pre>
+
 <h1 class="vtitle">{{ video.title }}</h1>
 <div class="vsub">
   <span>{{ video.views|count }}回再生</span>
@@ -28,14 +56,11 @@
 {% endif %}
 
 {% if related %}
-<h2>関連動画</h2>
-<div class="grid small">
+<h2 class="vtitle">関連動画</h2>
+<div class="grid">
   {% for v in related %}
   <a class="card" href="/watch/{{ v.id }}">
-    <div class="thumb">
-      <img loading="lazy" src="{{ v.thumb }}" alt="" onerror="this.style.visibility='hidden'">
-      <span class="dur">{{ v.seconds|duration }}</span>
-    </div>
+    <img src="{{ v.thumb }}" alt="" loading="lazy">
     <div class="meta">
       <div class="title">{{ v.title }}</div>
       <div class="sub">{{ v.views|count }}回再生</div>
@@ -46,228 +71,297 @@
 {% endif %}
 
 <script>
-(() => {
+(function () {
   const VID = {{ video.id|tojson }};
-  const player = document.getElementById('player');
+  const EMBED = {{ embed|tojson }};
   const vid = document.getElementById('vid');
   const layer = document.getElementById('layer');
   const state = document.getElementById('cstate');
+  const logbox = document.getElementById('log');
   const toggle = document.getElementById('toggle');
 
-  const IS_IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
-    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  let comments = [], shown = true, mode = null, now = 0, hlsLoaded = false;
+  let used = -1;
 
-  const NV = 'https://nvapi.nicovideo.jp/v1/watch/' + encodeURIComponent(VID);
-  const HDR = {
+  const lg = (t) => { logbox.textContent += t + '\n'; logbox.scrollTop = 1e9; };
+  const say = (t, bad) => { state.textContent = t; state.className = 'note' + (bad ? ' bad' : ''); };
+
+  function scan(node, out) {
+    if (node == null) return out;
+    if (typeof node === 'string') {
+      if (node.indexOf('.m3u8') >= 0 && node.indexOf('http') === 0) out.push(node);
+      return out;
+    }
+    if (Array.isArray(node)) { node.forEach(x => scan(x, out)); return out; }
+    if (typeof node === 'object') Object.values(node).forEach(x => scan(x, out));
+    return out;
+  }
+
+  const H = {
     'X-Frontend-Id': '6',
     'X-Frontend-Version': '0',
     'X-Request-With': 'https://www.nicovideo.jp'
   };
-  const TRACK = 'AAAAAAAAAA_' + Date.now();
 
-  let comments = [];
-  let shown = true;
-  let cursor = 0;
-  let prev = 0;
-  let usingIframe = false;
-  let onWatchPage = false;
-  let now = 0;
-  let lanes = [];
-  const LANES = 10;
-
-  const COLORS = {red:'#ff5b5b', pink:'#ff8fd0', orange:'#ffab5b', yellow:'#ffe14d',
-                  green:'#7ee787', cyan:'#5be1e1', blue:'#6aa8ff', purple:'#c58bff',
-                  black:'#222', white:'#fff'};
-
-  function resetLanes() { lanes = new Array(LANES).fill(0); }
-
-  function pickLane() {
-    const t = performance.now();
-    for (let i = 0; i < LANES; i++) if (lanes[i] < t) return i;
-    return Math.floor(Math.random() * LANES);
+  async function jget(url, headers) {
+    const r = await fetch(url, { headers: headers || {}, credentials: 'omit' });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
   }
 
-  function shoot(c) {
-    const big = c.cmd.includes('big');
-    const small = c.cmd.includes('small');
-    const el = document.createElement('div');
-    el.className = 'dm';
-    el.textContent = c.body;
-    el.style.fontSize = big ? '28px' : small ? '14px' : '20px';
+  const track = () => 'AAAAAAAAAA_' + Date.now();
 
-    const colorCmd = c.cmd.find(x => COLORS[x]);
-    if (colorCmd) el.style.color = COLORS[colorCmd];
+  const routes = [
+    ['guest(no-hdr)', () => jget('https://www.nicovideo.jp/api/watch/v3_guest/' +
+      VID + '?actionTrackId=' + track() + '&t=' + Date.now(), {})],
+    ['guest(hdr)', () => jget('https://www.nicovideo.jp/api/watch/v3_guest/' +
+      VID + '?actionTrackId=' + track() + '&t=' + Date.now(), H)],
+    ['nvapi', async () => {
+      const meta = await jget('https://nvapi.nicovideo.jp/v1/watch/' + VID +
+        '?actionTrackId=' + track(), H);
+      const domand = ((meta.data || {}).media || {}).domand || {};
+      const key = domand.accessRightKey;
+      const videos = (domand.videos || []).slice().sort((a, b) => (a.height || 0) - (b.height || 0));
+      const audios = (domand.audios || []).slice().sort((a, b) => (a.bitRate || 0) - (b.bitRate || 0));
+      if (!key || !videos.length) throw new Error('no access-right');
+      const under = videos.filter(v => (v.height || 0) <= 720);
+      const v = (under.length ? under : videos)[videos.length - 1] || videos[videos.length - 1];
+      const a = audios[audios.length - 1];
+      const outputs = a ? [[v.id, a.id]] : [[v.id]];
+      const r = await fetch('https://nvapi.nicovideo.jp/v1/watch/' + VID +
+        '/access-rights/hls?actionTrackId=' +
+        (((meta.data || {}).client || {}).watchTrackId || track()), {
+        method: 'POST',
+        headers: Object.assign({ 'Content-Type': 'application/json', 'X-Access-Right-Key': key }, H),
+        body: JSON.stringify({ outputs: outputs })
+      });
+      if (!r.ok) throw new Error('hls HTTP ' + r.status);
+      const j = await r.json();
+      const url = (j.data || {}).contentUrl;
+      if (!url) throw new Error('no contentUrl');
+      return { data: { media: { movie: { session: { urls: [{ url: url }] } } },
+                       comment: (meta.data || {}).comment } };
+    }],
+    ['server', () => jget('/api/brute/' + encodeURIComponent(VID), {})]
+  ];
 
-    if (c.cmd.includes('ue') || c.cmd.includes('shita')) {
-      const top = c.cmd.includes('ue');
-      el.style.left = '50%';
-      el.style.transform = 'translateX(-50%)';
-      el.style.top = top ? '6%' : 'auto';
-      el.style.bottom = top ? 'auto' : '8%';
-      layer.appendChild(el);
-      el.animate([{opacity: 0}, {opacity: 1}], {duration: 120, fill: 'forwards'});
-      setTimeout(() => el.remove(), 4000);
-      return;
-    }
-
-    const lane = pickLane();
-    lanes[lane] = performance.now() + (big ? 2200 : 1500);
-    el.style.top = `${(lane / LANES) * 82 + 2}%`;
-    el.style.left = '100%';
-    layer.appendChild(el);
-    const dist = layer.clientWidth + el.offsetWidth + 20;
-    const anim = el.animate(
-      [{transform: 'translateX(0)'}, {transform: `translateX(-${dist}px)`}],
-      {duration: 5200 + Math.random() * 1800, easing: 'linear'});
-    anim.onfinish = () => el.remove();
-  }
-
-  function tick() {
-    if (!usingIframe) now = vid.currentTime || 0;
-    if (shown && !onWatchPage) {
-      if (now < prev - 0.5) { cursor = 0; resetLanes(); }
-      while (cursor < comments.length && comments[cursor].v <= now) {
-        if (comments[cursor].v > prev - 1.2) shoot(comments[cursor]);
-        cursor++;
-      }
-    }
-    prev = now;
-    requestAnimationFrame(tick);
+  function collect(j) {
+    const out = [];
+    (((j || {}).data || {}).threads || []).forEach(th => {
+      (th.comments || []).forEach(c => {
+        if (c.body) out.push({ v: (c.vposMs || 0) / 1000, body: c.body, cmd: c.commands || [] });
+      });
+    });
+    out.sort((a, b) => a.v - b.v);
+    return out;
   }
 
   function setComments(list) {
-    comments = (list || []).filter(c => c && c.body).sort((a, b) => a.v - b.v);
-    if (comments.length && !onWatchPage) state.textContent = `${comments.length}件のコメント`;
+    comments = list;
+    used = 0;
+    say(list.length ? list.length + '件のコメント' : 'コメントなし');
   }
 
-  async function loadCommentsClient(meta) {
-    const nvc = ((meta || {}).comment || {}).nvComment || {};
-    if (!nvc.params || !nvc.threadKey) throw new Error('no nvComment');
-    const server = (nvc.server || 'https://public.nvcomment.nicovideo.jp').replace(/\/$/, '');
-    const res = await fetch(server + '/v1/threads?_frontendId=6', {
-      method: 'POST',
-      headers: Object.assign({}, HDR, {'Content-Type': 'application/json'}),
-      body: JSON.stringify({params: nvc.params, threadKey: nvc.threadKey, additionals: {}})
-    });
-    if (!res.ok) throw new Error('comment ' + res.status);
-    const j = await res.json();
-    const out = [];
-    for (const t of ((j.data || {}).threads || [])) {
-      for (const c of (t.comments || [])) {
-        out.push({v: (c.vposMs || 0) / 1000, body: c.body || '', cmd: c.commands || []});
-      }
+  async function commentsFrom(meta) {
+    const nv = (((meta || {}).data || {}).comment || {}).nvComment;
+    if (!nv || !nv.params || !nv.threadKey) return false;
+    try {
+      const r = await fetch((nv.server || 'https://public.nvcomment.nicovideo.jp').replace(/\/$/, '') +
+        '/v1/threads?_frontendId=6', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Frontend-Id': '6', 'X-Frontend-Version': '0' },
+        body: JSON.stringify({ params: nv.params, threadKey: nv.threadKey, additionals: {} })
+      });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const list = collect(await r.json());
+      if (!list.length) return false;
+      setComments(list);
+      return true;
+    } catch (e) {
+      lg('コメント(client): ' + e.message);
+      return false;
     }
-    setComments(out);
   }
 
-  async function getStreamUrl(meta) {
-    const domand = ((meta.media || {}).domand) || {};
-    const key = domand.accessRightKey;
-    if (!key) throw new Error('no rights');
-    const videos = (domand.videos || []).filter(v => v.id);
-    const audios = (domand.audios || []).filter(a => a.id);
-    if (!videos.length) throw new Error('no quality');
-    videos.sort((a, b) => (a.height || 0) - (b.height || 0));
-    const under = videos.filter(v => (v.height || 0) <= 720);
-    const v = (under.length ? under : videos).slice(-1)[0];
-    audios.sort((a, b) => (a.bitRate || 0) - (b.bitRate || 0));
-    const a = audios.slice(-1)[0];
-    const outputs = a ? [[v.id, a.id]] : [[v.id]];
+  async function commentsFromServer() {
+    if (used === 0) return;
+    try {
+      const j = await jget('/api/comments/' + encodeURIComponent(VID), {});
+      const list = (j.comments || []).map(c => ({ v: c.v, body: c.body, cmd: c.cmd || [] }));
+      if (list.length) setComments(list);
+      else if (used !== 0) say('コメント取得できません');
+    } catch (e) {
+      if (used !== 0) say('コメント取得できません');
+    }
+  }
 
-    const res = await fetch(NV + '/access-rights/hls?actionTrackId=' + TRACK, {
-      method: 'POST',
-      headers: Object.assign({}, HDR, {
-        'Content-Type': 'application/json',
-        'X-Access-Right-Key': key
-      }),
-      body: JSON.stringify({outputs})
+  function loadHls() {
+    if (hlsLoaded || window.Hls) { hlsLoaded = true; return Promise.resolve(); }
+    return new Promise(res => {
+      const s = document.createElement('script');
+      s.src = 'https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js';
+      s.onload = () => { hlsLoaded = true; res(); };
+      s.onerror = () => { hlsLoaded = true; res(); };
+      document.head.appendChild(s);
     });
-    if (!res.ok) throw new Error('hls ' + res.status);
-    const j = await res.json();
-    const url = ((j.data || {}).contentUrl);
-    if (!url) throw new Error('no url');
-    return url;
   }
 
-  function playUrl(url) {
-    const start = () => { vid.play().catch(() => {}); };
-
-    if (vid.canPlayType('application/vnd.apple.mpegurl')) {
+  function nativePlay(url) {
+    return new Promise(res => {
+      let done = false;
+      const finish = (ok) => {
+        if (done) return;
+        done = true;
+        vid.removeEventListener('loadedmetadata', ok1);
+        vid.removeEventListener('error', bad);
+        res(ok);
+      };
+      const ok1 = () => finish(true);
+      const bad = () => finish(false);
+      vid.addEventListener('loadedmetadata', ok1);
+      vid.addEventListener('error', bad);
       vid.src = url;
-      vid.addEventListener('loadedmetadata', start, {once: true});
-      vid.addEventListener('error', useWatchPage, {once: true});
-      return;
-    }
+      vid.load();
+      setTimeout(() => finish(false), 9000);
+    });
+  }
 
-    const boot = () => {
-      if (!window.Hls || !window.Hls.isSupported()) return useWatchPage();
-      const hls = new window.Hls({maxBufferLength: 30});
+  async function hlsPlay(url) {
+    await loadHls();
+    if (!window.Hls || !window.Hls.isSupported()) return false;
+    return new Promise(res => {
+      let done = false;
+      const finish = (ok) => { if (!done) { done = true; res(ok); } };
+      const hls = new window.Hls({ maxBufferLength: 30 });
+      hls.on(window.Hls.Events.MANIFEST_PARSED, () => finish(true));
       hls.on(window.Hls.Events.ERROR, (_, d) => {
-        if (d.fatal) { hls.destroy(); useWatchPage(); }
+        if (d.fatal) { try { hls.destroy(); } catch (e) {} finish(false); }
       });
       hls.loadSource(url);
       hls.attachMedia(vid);
-      hls.on(window.Hls.Events.MANIFEST_PARSED, start);
-    };
-
-    if (window.Hls) return boot();
-    const s = document.createElement('script');
-    s.src = 'https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js';
-    s.onload = boot;
-    s.onerror = useWatchPage;
-    document.head.appendChild(s);
-  }
-
-  /* 1段目：埋め込みプレイヤー */
-  function useEmbed() {
-    if (usingIframe || onWatchPage) return;
-    usingIframe = true;
-    vid.remove();
-    const frame = document.createElement('iframe');
-    frame.allow = 'autoplay; fullscreen; encrypted-media';
-    frame.allowFullscreen = true;
-    frame.referrerPolicy = 'strict-origin-when-cross-origin';
-    frame.src = 'https://embed.nicovideo.jp/watch/' + encodeURIComponent(VID) +
-      '?jsapi=1&playerId=1' + (IS_IOS ? '' : '&autoplay=1');
-    player.appendChild(frame);
-
-    let alive = false;
-    const timer = setTimeout(() => { if (!alive) useWatchPage(); }, 7000);
-
-    window.addEventListener('message', (e) => {
-      if (e.origin !== 'https://embed.nicovideo.jp') return;
-      const d = e.data || {};
-      if (d.eventName === 'playerMetadataChange') {
-        alive = true;
-        clearTimeout(timer);
-        if (d.data && typeof d.data.currentTime === 'number') now = d.data.currentTime;
-      }
-      if (d.eventName === 'error') { clearTimeout(timer); useWatchPage(); }
+      setTimeout(() => finish(false), 12000);
     });
   }
 
-  /* 2段目：ニコニコの視聴ページをそのまま枠内に出す */
-  function useWatchPage() {
-    if (onWatchPage) return;
-    onWatchPage = true;
-    usingIframe = true;
-    layer.innerHTML = '';
-    const old = player.querySelector('iframe');
-    if (old) old.remove();
-    if (vid.parentNode) vid.remove();
-    const poster = document.getElementById('poster');
-    if (poster) poster.style.display = 'none';
+  async function play(url) {
+    if (vid.canPlayType('application/vnd.apple.mpegurl')) {
+      if (await nativePlay(url)) { mode = 'video'; say('再生中'); vid.play().catch(() => {}); return true; }
+    }
+    if (await hlsPlay(url)) { mode = 'video'; say('再生中'); vid.play().catch(() => {}); return true; }
+    return false;
+  }
 
+  function useEmbed() {
+    mode = 'iframe';
+    layer.innerHTML = '';
+    vid.remove();
     const frame = document.createElement('iframe');
-    frame.className = 'watchframe';
-    frame.allow = 'autoplay; fullscreen; encrypted-media; clipboard-write';
+    frame.src = EMBED + '?jsapi=1&playerId=1&from=0';
+    frame.allow = 'autoplay; fullscreen; encrypted-media';
     frame.allowFullscreen = true;
     frame.referrerPolicy = 'strict-origin-when-cross-origin';
-    frame.src = 'https://www.nicovideo.jp/watch/' + encodeURIComponent(VID);
-    player.appendChild(frame);
+    document.getElementById('player').appendChild(frame);
+    window.addEventListener('message', (e) => {
+      if (e.origin !== 'https://embed.nicovideo.jp') return;
+      const d = e.data || {};
+      if (d.eventName === 'playerMetadataChange' && d.data &&
+          typeof d.data.currentTime === 'number') now = d.data.currentTime;
+      if (d.eventName === 'error') {
+        lg('embed: error');
+        useWatchPage();
+      }
+    });
+    say('埋め込みで再生しています');
+    setTimeout(() => {
+      if (mode === 'iframe') {
+        const f = document.querySelector('#player iframe');
+        if (f && f.src.indexOf('embed.nicovideo.jp') >= 0) useWatchPage();
+      }
+    }, 7000);
+  }
 
-    toggle.style.display = 'none';
-    state.textContent = 'この動画はニコニコ動画のページで再生しています';
+  function useWatchPage() {
+    if (mode === 'watch') return;
+    mode = 'watch';
+    layer.innerHTML = '';
+    const old = document.querySelector('#player iframe');
+    if (old) old.remove();
+    const frame = document.createElement('iframe');
+    frame.src = 'https://www.nicovideo.jp/watch/' + VID;
+    frame.allowFullscreen = true;
+    frame.referrerPolicy = 'strict-origin-when-cross-origin';
+    document.getElementById('player').appendChild(frame);
+    say('視聴ページを表示しています');
+    commentsFromServer();
+  }
+
+  async function boot() {
+    commentsFromServer();
+    for (const [name, fn] of routes) {
+      try {
+        const meta = await fn();
+        const urls = scan(meta, []);
+        if (!(await commentsFrom(meta))) commentsFromServer();
+        if (!urls.length) { lg(name + ': URLなし'); continue; }
+        lg(name + ': ' + urls[0].slice(0, 90));
+        if (await play(urls[0])) return;
+        lg(name + ': 直リンク失敗 → プロキシ');
+        if (await play('/hls?u=' + encodeURIComponent(urls[0]))) return;
+        lg(name + ': プロキシも失敗');
+      } catch (e) {
+        lg(name + ': ' + e.message);
+      }
+    }
+    lg('全ルート失敗 → iframe');
+    useEmbed();
+  }
+
+  // ダンマク
+  const lanes = [];
+  const LANE_H = 26;
+  function spawn(c) {
+    const big = c.cmd.indexOf('big') >= 0;
+    const small = c.cmd.indexOf('small') >= 0;
+    const el = document.createElement('div');
+    el.className = 'dm';
+    el.textContent = c.body;
+    el.style.fontSize = big ? '26px' : small ? '13px' : '19px';
+    const col = c.cmd.find(x => /^#[0-9a-f]{6}$/i.test(x));
+    if (col) el.style.color = col;
+    const h = layer.clientHeight || 1;
+    const total = Math.max(1, Math.floor(h / LANE_H));
+    let lane = -1;
+    for (let i = 0; i < total; i++) {
+      if (!lanes[i] || lanes[i] < performance.now()) { lane = i; break; }
+    }
+    if (lane < 0) return;
+    const top = c.cmd.indexOf('ue') >= 0 ? lane * LANE_H
+      : c.cmd.indexOf('shita') >= 0 ? h - (lane + 1) * LANE_H
+        : lane * LANE_H;
+    el.style.top = Math.max(0, top) + 'px';
+    el.style.left = '100%';
+    layer.appendChild(el);
+    const w = el.offsetWidth || 200;
+    const dist = layer.clientWidth + w + 20;
+    const dur = Math.max(4000, dist * 11);
+    lanes[lane] = performance.now() + 1400;
+    const anim = el.animate(
+      [{ transform: 'translateX(0)' }, { transform: 'translateX(-' + dist + 'px)' }],
+      { duration: dur, easing: 'linear' });
+    anim.onfinish = () => el.remove();
+  }
+
+  let idx = 0;
+  function tick() {
+    const t = mode === 'video' ? vid.currentTime : now;
+    if (shown && comments.length && t > 0) {
+      if (idx > comments.length || (comments[idx - 1] && comments[idx - 1].v > t + 2)) idx = 0;
+      while (idx < comments.length && comments[idx].v <= t) {
+        if (comments[idx].v > t - 1.5) spawn(comments[idx]);
+        idx++;
+      }
+    }
+    requestAnimationFrame(tick);
   }
 
   toggle.addEventListener('click', () => {
@@ -277,32 +371,7 @@
     if (!shown) layer.innerHTML = '';
   });
 
-  (async () => {
-    let meta = null;
-    try {
-      const r = await fetch(NV + '?actionTrackId=' + TRACK, {headers: HDR});
-      if (r.ok) meta = (await r.json()).data;
-    } catch (e) {}
-
-    if (meta) loadCommentsClient(meta).catch(() => {});
-    else fetch('/api/comments/' + encodeURIComponent(VID))
-      .then(r => r.json()).then(d => setComments(d.comments)).catch(() => {});
-
-    if (meta) {
-      try {
-        playUrl(await getStreamUrl(meta));
-        return;
-      } catch (e) {}
-    }
-
-    try {
-      const d = await fetch('/api/stream/' + encodeURIComponent(VID)).then(r => r.json());
-      if (d && d.url) { playUrl(d.url); return; }
-    } catch (e) {}
-
-    useEmbed();
-  })();
-
+  boot();
   requestAnimationFrame(tick);
 })();
 </script>
