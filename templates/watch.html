@@ -10,6 +10,8 @@
 <div class="dmbox">
   <button id="toggle" class="chip on">コメント ON</button>
   <span class="note" id="cstate">プレイヤー準備中…</span>
+  <a class="chip" id="openlink" href="https://www.nicovideo.jp/watch/{{ video.id }}"
+     target="_blank" rel="noopener">別タブで開く</a>
 </div>
 <h1 class="vtitle">{{ video.title }}</h1>
 <div class="vsub">
@@ -24,7 +26,6 @@
   {% for t in video.tags %}<a href="/search?q={{ t|urlencode }}">{{ t }}</a>{% endfor %}
 </div>
 {% endif %}
-<p class="note"><a href="https://www.nicovideo.jp/watch/{{ video.id }}" target="_blank" rel="noopener">ニコニコ動画で開く</a></p>
 
 {% if related %}
 <h2>関連動画</h2>
@@ -69,6 +70,7 @@
   let cursor = 0;
   let prev = 0;
   let usingIframe = false;
+  let onWatchPage = false;
   let now = 0;
   let lanes = [];
   const LANES = 10;
@@ -122,7 +124,7 @@
 
   function tick() {
     if (!usingIframe) now = vid.currentTime || 0;
-    if (shown) {
+    if (shown && !onWatchPage) {
       if (now < prev - 0.5) { cursor = 0; resetLanes(); }
       while (cursor < comments.length && comments[cursor].v <= now) {
         if (comments[cursor].v > prev - 1.2) shoot(comments[cursor]);
@@ -135,10 +137,9 @@
 
   function setComments(list) {
     comments = (list || []).filter(c => c && c.body).sort((a, b) => a.v - b.v);
-    state.textContent = comments.length ? `${comments.length}件のコメント` : '';
+    if (comments.length && !onWatchPage) state.textContent = `${comments.length}件のコメント`;
   }
 
-  /* --- コメント：まずブラウザから nvcomment を叩く --- */
   async function loadCommentsClient(meta) {
     const nvc = ((meta || {}).comment || {}).nvComment || {};
     if (!nvc.params || !nvc.threadKey) throw new Error('no nvComment');
@@ -159,7 +160,6 @@
     setComments(out);
   }
 
-  /* --- ストリームURL取得（ブラウザ側） --- */
   async function getStreamUrl(meta) {
     const domand = ((meta.media || {}).domand) || {};
     const key = domand.accessRightKey;
@@ -195,15 +195,15 @@
     if (vid.canPlayType('application/vnd.apple.mpegurl')) {
       vid.src = url;
       vid.addEventListener('loadedmetadata', start, {once: true});
-      vid.addEventListener('error', useIframe, {once: true});
+      vid.addEventListener('error', useWatchPage, {once: true});
       return;
     }
 
     const boot = () => {
-      if (!window.Hls || !window.Hls.isSupported()) return useIframe();
+      if (!window.Hls || !window.Hls.isSupported()) return useWatchPage();
       const hls = new window.Hls({maxBufferLength: 30});
       hls.on(window.Hls.Events.ERROR, (_, d) => {
-        if (d.fatal) { hls.destroy(); useIframe(); }
+        if (d.fatal) { hls.destroy(); useWatchPage(); }
       });
       hls.loadSource(url);
       hls.attachMedia(vid);
@@ -214,14 +214,14 @@
     const s = document.createElement('script');
     s.src = 'https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js';
     s.onload = boot;
-    s.onerror = useIframe;
+    s.onerror = useWatchPage;
     document.head.appendChild(s);
   }
 
-  function useIframe() {
-    if (usingIframe) return;
+  /* 1段目：埋め込みプレイヤー */
+  function useEmbed() {
+    if (usingIframe || onWatchPage) return;
     usingIframe = true;
-    layer.innerHTML = '';
     vid.remove();
     const frame = document.createElement('iframe');
     frame.allow = 'autoplay; fullscreen; encrypted-media';
@@ -230,15 +230,44 @@
     frame.src = 'https://embed.nicovideo.jp/watch/' + encodeURIComponent(VID) +
       '?jsapi=1&playerId=1' + (IS_IOS ? '' : '&autoplay=1');
     player.appendChild(frame);
+
+    let alive = false;
+    const timer = setTimeout(() => { if (!alive) useWatchPage(); }, 7000);
+
     window.addEventListener('message', (e) => {
       if (e.origin !== 'https://embed.nicovideo.jp') return;
       const d = e.data || {};
-      if (d.eventName === 'playerMetadataChange' && d.data &&
-          typeof d.data.currentTime === 'number') now = d.data.currentTime;
-      if (d.eventName === 'error') {
-        state.textContent = 'この動画は再生できません。「ニコニコ動画で開く」からどうぞ';
+      if (d.eventName === 'playerMetadataChange') {
+        alive = true;
+        clearTimeout(timer);
+        if (d.data && typeof d.data.currentTime === 'number') now = d.data.currentTime;
       }
+      if (d.eventName === 'error') { clearTimeout(timer); useWatchPage(); }
     });
+  }
+
+  /* 2段目：ニコニコの視聴ページをそのまま枠内に出す */
+  function useWatchPage() {
+    if (onWatchPage) return;
+    onWatchPage = true;
+    usingIframe = true;
+    layer.innerHTML = '';
+    const old = player.querySelector('iframe');
+    if (old) old.remove();
+    if (vid.parentNode) vid.remove();
+    const poster = document.getElementById('poster');
+    if (poster) poster.style.display = 'none';
+
+    const frame = document.createElement('iframe');
+    frame.className = 'watchframe';
+    frame.allow = 'autoplay; fullscreen; encrypted-media; clipboard-write';
+    frame.allowFullscreen = true;
+    frame.referrerPolicy = 'strict-origin-when-cross-origin';
+    frame.src = 'https://www.nicovideo.jp/watch/' + encodeURIComponent(VID);
+    player.appendChild(frame);
+
+    toggle.style.display = 'none';
+    state.textContent = 'この動画はニコニコ動画のページで再生しています';
   }
 
   toggle.addEventListener('click', () => {
@@ -271,7 +300,7 @@
       if (d && d.url) { playUrl(d.url); return; }
     } catch (e) {}
 
-    useIframe();
+    useEmbed();
   })();
 
   requestAnimationFrame(tick);
