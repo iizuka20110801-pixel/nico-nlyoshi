@@ -1,12 +1,13 @@
-"""nico-viewer-plus — ニコニコ動画ビューア (Render デプロイ用)"""
+"""nico-nlyoshi — ニコょし"""
 import asyncio
 import html as html_lib
 import json
 import re
 import time
+import traceback
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 import httpx
 from fastapi import FastAPI, Query, Request
@@ -17,6 +18,7 @@ from fastapi.templating import Jinja2Templates
 API = "https://snapshot.search.nicovideo.jp/api/v2/snapshot/video/contents/search"
 WATCH = "https://www.nicovideo.jp/watch/{0}"
 EMBED = "https://embed.nicovideo.jp/watch/{0}"
+NVAPI = "https://nvapi.nicovideo.jp/v1/watch/{0}"
 UA = "nico-viewer-plus/1.0 (personal project)"
 BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
@@ -67,6 +69,14 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 
 
+@app.exception_handler(Exception)
+async def on_error(request: Request, exc: Exception):
+    traceback.print_exc()
+    return HTMLResponse(
+        "<h1>500</h1><pre>" + html_lib.escape(repr(exc)) + "</pre>",
+        status_code=500)
+
+
 # ---------- helpers ----------
 
 def fmt_count(n) -> str:
@@ -99,7 +109,6 @@ templates.env.filters["date"] = fmt_date
 
 
 def thumb_url(url: str | None) -> str:
-    """CDN のサムネ URL を自前プロキシ経由に変換"""
     if not url:
         return ""
     return "/thumb?u=" + quote(url, safe="")
@@ -140,6 +149,23 @@ def norm(item: dict) -> dict:
     }
 
 
+def build_from_nv(video_id: str, video: dict, tags: list[str]) -> dict:
+    thumb = video.get("thumbnail") or {}
+    return {
+        "id": video_id,
+        "title": video.get("title") or "(無題)",
+        "views": video.get("viewCount") or 0,
+        "comments": video.get("commentCount") or 0,
+        "mylists": video.get("mylistCount") or 0,
+        "likes": 0,
+        "seconds": video.get("lengthSeconds") or 0,
+        "start": video.get("registeredAt"),
+        "genre": None,
+        "tags": tags[:12],
+        "thumb": thumb_url(thumb.get("player") or thumb.get("largeUrl")),
+    }
+
+
 async def search(keyword: str, *, sort: str = "view", genre: str = "",
                  page: int = 1, targets: str = "title,description,tags",
                  filters: list[tuple[str, str]] | None = None,
@@ -175,8 +201,6 @@ async def search(keyword: str, *, sort: str = "view", genre: str = "",
 
 
 async def fetch_one(video_id: str) -> dict | None:
-    """contentId 完全一致で1件取得（スナップショットAPIは q 検索ではIDに当たらない）"""
-
     async def run():
         r = await _client.get(API, params={
             "q": "", "targets": "title", "fields": FIELDS,
@@ -197,9 +221,22 @@ async def fetch_one(video_id: str) -> dict | None:
     return None
 
 
-async def watch_data(video_id: str) -> dict | None:
-    """視聴ページの data-api-data を取得（インデックス未収載の動画の補完・コメント用）"""
+async def nv_watch(video_id: str) -> dict | None:
+    async def run():
+        r = await _browser.get(
+            NVAPI.format(video_id),
+            params={"actionTrackId": "AAAAAAAAAA_" + str(int(time.time() * 1000))})
+        if r.status_code != 200:
+            return None
+        return (r.json() or {}).get("data")
 
+    try:
+        return await cached(f"n:{video_id}", 600, run)
+    except Exception:
+        return None
+
+
+async def watch_data(video_id: str) -> dict | None:
     async def run():
         r = await _browser.get(WATCH.format(video_id))
         if r.status_code != 200:
@@ -219,52 +256,45 @@ async def watch_data(video_id: str) -> dict | None:
 
 
 async def fetch_meta(video_id: str) -> dict | None:
-    """スナップショットAPI優先、無ければ視聴ページから補完"""
     got = await fetch_one(video_id)
     if got:
         return got
+
+    nv = await nv_watch(video_id)
+    if nv and nv.get("video"):
+        tags = [t.get("name") for t in ((nv.get("tag") or {}).get("items") or [])
+                if t.get("name")]
+        return build_from_nv(video_id, nv["video"], tags)
+
     api = await watch_data(video_id)
-    if not api:
-        return None
-    video = api.get("video") or {}
-    if not video:
+    if not api or not api.get("video"):
         return None
     tags = [t.get("name") for t in ((api.get("tag") or {}).get("items") or [])
             if t.get("name")]
-    thumb = (video.get("thumbnail") or {})
-    return {
-        "id": video_id,
-        "title": video.get("title") or "(無題)",
-        "views": video.get("viewCount") or 0,
-        "comments": video.get("commentCount") or 0,
-        "mylists": video.get("mylistCount") or 0,
-        "likes": 0,
-        "seconds": video.get("lengthSeconds") or 0,
-        "start": video.get("registeredAt"),
-        "genre": None,
-        "tags": tags[:12],
-        "thumb": thumb_url(thumb.get("player") or thumb.get("largeUrl")),
-    }
+    return build_from_nv(video_id, api["video"], tags)
 
 
 async def fetch_comments(video_id: str) -> list[dict]:
-    """nvComment 経由でコメント取得（ログイン不要）"""
-    api = await watch_data(video_id)
-    if not api:
-        return []
-    nv = ((api.get("comment") or {}).get("nvComment") or {})
-    params = nv.get("params")
-    thread_key = nv.get("threadKey")
+    nvc = ((await nv_watch(video_id) or {}).get("comment") or {}).get("nvComment") or {}
+    params = nvc.get("params")
+    thread_key = nvc.get("threadKey")
+
+    if not params or not thread_key:
+        api = await watch_data(video_id)
+        nvc = ((api or {}).get("comment") or {}).get("nvComment") or {}
+        params = nvc.get("params")
+        thread_key = nvc.get("threadKey")
     if not params or not thread_key:
         return []
-    server = (nv.get("server") or "https://public.nvcomment.nicovideo.jp").rstrip("/")
+
+    server = (nvc.get("server") or "https://public.nvcomment.nicovideo.jp").rstrip("/")
 
     async def run():
-        r = await _browser.post(f"{server}/v1/threads?_frontendId=6",
-                                json={"params": params, "threadKey": thread_key,
-                                      "additionals": {}},
-                                headers={"Content-Type": "application/json",
-                                         "Origin": "https://www.nicovideo.jp"})
+        r = await _browser.post(
+            f"{server}/v1/threads?_frontendId=6",
+            json={"params": params, "threadKey": thread_key, "additionals": {}},
+            headers={"Content-Type": "application/json",
+                     "Origin": "https://www.nicovideo.jp"})
         if r.status_code != 200:
             return []
         out = []
@@ -286,12 +316,12 @@ async def fetch_comments(video_id: str) -> list[dict]:
 
 def remember(request: Request, video: dict) -> str:
     try:
-        hist = json.loads(request.cookies.get("history", "[]"))
+        hist = json.loads(unquote(request.cookies.get("history", "[]")))
     except Exception:
         hist = []
     hist = [h for h in hist if h.get("id") != video["id"]]
-    hist.insert(0, {"id": video["id"], "title": video["title"]})
-    return json.dumps(hist[:24], ensure_ascii=False)
+    hist.insert(0, {"id": video["id"], "title": (video["title"] or "")[:50]})
+    return quote(json.dumps(hist[:12], ensure_ascii=False), safe="")
 
 
 def ctx(request: Request, **kw) -> dict:
@@ -368,7 +398,7 @@ async def api_comments(video_id: str):
 @app.get("/history", response_class=HTMLResponse)
 async def history_page(request: Request):
     try:
-        hist = json.loads(request.cookies.get("history", "[]"))
+        hist = json.loads(unquote(request.cookies.get("history", "[]")))
     except Exception:
         hist = []
     return templates.TemplateResponse("search.html", ctx(
