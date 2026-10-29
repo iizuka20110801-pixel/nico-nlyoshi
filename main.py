@@ -1,4 +1,4 @@
-"""nico-viewer-plus — ニコニコょし"""
+"""nico-viewer-plus — ニコニコ動画ビューア (Render デプロイ用)"""
 import asyncio
 import html as html_lib
 import json
@@ -7,7 +7,7 @@ import time
 import traceback
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from urllib.parse import quote, unquote
+from urllib.parse import quote, unquote, urljoin
 
 import httpx
 from fastapi import FastAPI, Query, Request
@@ -20,6 +20,8 @@ WATCH = "https://www.nicovideo.jp/watch/{0}"
 EMBED = "https://embed.nicovideo.jp/watch/{0}"
 NVAPI = "https://nvapi.nicovideo.jp/v1/watch/{0}"
 HLS = "https://nvapi.nicovideo.jp/v1/watch/{0}/access-rights/hls"
+GUEST = "https://www.nicovideo.jp/api/watch/v3_guest/{0}"
+NVCOMMENT = "https://public.nvcomment.nicovideo.jp"
 UA = "nico-viewer-plus/1.0 (personal project)"
 BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
@@ -47,23 +49,24 @@ _locks: dict[str, asyncio.Lock] = {}
 _client: httpx.AsyncClient | None = None
 _browser: httpx.AsyncClient | None = None
 
+NICO_HEADERS = {
+    "User-Agent": BROWSER_UA,
+    "Accept-Language": "ja-JP,ja;q=0.9",
+    "X-Frontend-Id": "6",
+    "X-Frontend-Version": "0",
+    "X-Request-With": "https://www.nicovideo.jp",
+    "Origin": "https://www.nicovideo.jp",
+    "Referer": "https://www.nicovideo.jp/",
+}
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _client, _browser
     _client = httpx.AsyncClient(timeout=12.0, headers={"User-Agent": UA},
                                 follow_redirects=True)
-    _browser = httpx.AsyncClient(timeout=15.0, headers={
-        "User-Agent": BROWSER_UA,
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "ja-JP,ja;q=0.9",
-        "X-Frontend-Id": "6",
-        "X-Frontend-Version": "0",
-        "X-Client-Os-Type": "others",
-        "X-Request-With": "https://www.nicovideo.jp",
-        "Origin": "https://www.nicovideo.jp",
-        "Referer": "https://www.nicovideo.jp/",
-    }, follow_redirects=True)
+    _browser = httpx.AsyncClient(timeout=15.0, headers=NICO_HEADERS,
+                                 follow_redirects=True)
     yield
     await _client.aclose()
     await _browser.aclose()
@@ -171,6 +174,24 @@ def build_from_nv(video_id: str, video: dict, tags: list[str]) -> dict:
     }
 
 
+def scan_m3u8(node, out: list[str]) -> list[str]:
+    """どんな形のJSONでも .m3u8 を含む文字列を全部拾う（力づく）"""
+    if node is None:
+        return out
+    if isinstance(node, str):
+        if ".m3u8" in node and node.startswith("http"):
+            out.append(node)
+        return out
+    if isinstance(node, list):
+        for x in node:
+            scan_m3u8(x, out)
+        return out
+    if isinstance(node, dict):
+        for x in node.values():
+            scan_m3u8(x, out)
+    return out
+
+
 async def search(keyword: str, *, sort: str = "view", genre: str = "",
                  page: int = 1, targets: str = "title,description,tags",
                  filters: list[tuple[str, str]] | None = None,
@@ -236,7 +257,25 @@ async def nv_watch(video_id: str) -> dict | None:
         return (r.json() or {}).get("data")
 
     try:
-        return await cached(f"n:{video_id}", 600, run)
+        return await cached(f"n:{video_id}", 300, run)
+    except Exception:
+        return None
+
+
+async def guest_watch(video_id: str) -> dict | None:
+    """視聴ページが内部で叩いている v3_guest を直叩きする（最終手段）"""
+    track = "AAAAAAAAAA_" + str(int(time.time() * 1000))
+
+    async def run():
+        r = await _browser.get(GUEST.format(video_id),
+                               params={"actionTrackId": track,
+                                       "t": str(int(time.time() * 1000))})
+        if r.status_code != 200:
+            return None
+        return (r.json() or {}).get("data")
+
+    try:
+        return await cached(f"g:{video_id}", 300, run)
     except Exception:
         return None
 
@@ -247,15 +286,23 @@ async def watch_data(video_id: str) -> dict | None:
         if r.status_code != 200:
             return None
         m = re.search(r'id="js-initial-watch-data"[^>]*data-api-data="([^"]*)"', r.text)
-        if not m:
-            return None
-        try:
-            return json.loads(html_lib.unescape(m.group(1)))
-        except Exception:
-            return None
+        if m:
+            try:
+                return json.loads(html_lib.unescape(m.group(1)))
+            except Exception:
+                pass
+        m = re.search(r'id="__NEXT_DATA__"[^>]*>(.*?)</script>', r.text, re.S)
+        if m:
+            try:
+                blob = json.loads(m.group(1))
+                return (((blob.get("props") or {}).get("pageProps") or {})
+                        .get("serverResponse") or blob)
+            except Exception:
+                pass
+        return None
 
     try:
-        return await cached(f"w:{video_id}", 600, run)
+        return await cached(f"w:{video_id}", 300, run)
     except Exception:
         return None
 
@@ -265,34 +312,34 @@ async def fetch_meta(video_id: str) -> dict | None:
     if got:
         return got
 
-    nv = await nv_watch(video_id)
-    if nv and nv.get("video"):
-        tags = [t.get("name") for t in ((nv.get("tag") or {}).get("items") or [])
+    for source in (nv_watch, guest_watch, watch_data):
+        api = await source(video_id)
+        if not api or not api.get("video"):
+            continue
+        tags = [t.get("name") for t in ((api.get("tag") or {}).get("items") or [])
                 if t.get("name")]
-        return build_from_nv(video_id, nv["video"], tags)
+        return build_from_nv(video_id, api["video"], tags)
+    return None
 
-    api = await watch_data(video_id)
-    if not api or not api.get("video"):
-        return None
-    tags = [t.get("name") for t in ((api.get("tag") or {}).get("items") or [])
-            if t.get("name")]
-    return build_from_nv(video_id, api["video"], tags)
+
+def nvcomment_of(api: dict | None) -> dict:
+    return (((api or {}).get("comment") or {}).get("nvComment") or {})
 
 
 async def fetch_comments(video_id: str) -> list[dict]:
-    nvc = ((await nv_watch(video_id) or {}).get("comment") or {}).get("nvComment") or {}
+    nvc = {}
+    for source in (nv_watch, guest_watch, watch_data):
+        api = await source(video_id)
+        nvc = nvcomment_of(api)
+        if nvc.get("params") and nvc.get("threadKey"):
+            break
+
     params = nvc.get("params")
     thread_key = nvc.get("threadKey")
-
-    if not params or not thread_key:
-        api = await watch_data(video_id)
-        nvc = ((api or {}).get("comment") or {}).get("nvComment") or {}
-        params = nvc.get("params")
-        thread_key = nvc.get("threadKey")
     if not params or not thread_key:
         return []
 
-    server = (nvc.get("server") or "https://public.nvcomment.nicovideo.jp").rstrip("/")
+    server = (nvc.get("server") or NVCOMMENT).rstrip("/")
 
     async def run():
         r = await _browser.post(
@@ -313,54 +360,66 @@ async def fetch_comments(video_id: str) -> list[dict]:
         return out
 
     try:
-        return await cached(f"c:{video_id}", 600, run)
+        return await cached(f"c:{video_id}", 300, run)
     except Exception:
         return []
 
 
 async def fetch_stream(video_id: str) -> dict:
-    """HLS の再生URLを取得（自前プレイヤー用）"""
-    nv = await nv_watch(video_id)
-    if not nv:
-        return {"error": "meta"}
+    """HLS の URL を取れる経路を全部試す（力づく）"""
+    urls: list[str] = []
+    comments: dict = {}
 
-    domand = ((nv.get("media") or {}).get("domand") or {})
-    key = domand.get("accessRightKey")
-    if not key:
-        return {"error": "rights"}
+    for source in (guest_watch, nv_watch):
+        api = await source(video_id)
+        if not api:
+            continue
+        nvc = nvcomment_of(api)
+        if nvc.get("params") and nvc.get("threadKey") and not comments:
+            comments = {"params": nvc["params"],
+                        "threadKey": nvc["threadKey"],
+                        "server": (nvc.get("server") or NVCOMMENT).rstrip("/")}
+        scan_m3u8(api, urls)
+        if urls:
+            break
 
-    videos = [v for v in (domand.get("videos") or []) if v.get("id")]
-    audios = [a for a in (domand.get("audios") or []) if a.get("id")]
-    if not videos:
-        return {"error": "quality"}
+    # nvapi の access-rights/hls 経由
+    if not urls:
+        api = await nv_watch(video_id)
+        domand = ((api or {}).get("media") or {}).get("domand") or {}
+        key = domand.get("accessRightKey")
+        videos = sorted(domand.get("videos") or [],
+                        key=lambda v: v.get("height") or 0)
+        audios = sorted(domand.get("audios") or [],
+                        key=lambda a: a.get("bitRate") or 0)
+        if key and videos:
+            under = [v for v in videos if (v.get("height") or 0) <= 720]
+            video = (under or videos)[-1]
+            audio = audios[-1] if audios else None
+            outputs = [[video["id"], audio["id"]]] if audio else [[video["id"]]]
+            track = ((api.get("client") or {}).get("watchTrackId")
+                     or "AAAAAAAAAA_" + str(int(time.time() * 1000)))
+            try:
+                r = await _browser.post(
+                    HLS.format(video_id), params={"actionTrackId": track},
+                    json={"outputs": outputs},
+                    headers={"Content-Type": "application/json",
+                             "X-Access-Right-Key": key})
+                if r.status_code in (200, 201):
+                    url = ((r.json() or {}).get("data") or {}).get("contentUrl")
+                    if url:
+                        urls.append(url)
+            except Exception:
+                pass
 
-    videos.sort(key=lambda v: v.get("height") or 0)
-    under = [v for v in videos if (v.get("height") or 0) <= 720]
-    video = (under or videos)[-1]
-    audios.sort(key=lambda a: a.get("bitRate") or 0)
-    audio = audios[-1] if audios else None
+    if not comments:
+        nvc = nvcomment_of(await watch_data(video_id))
+        if nvc.get("params") and nvc.get("threadKey"):
+            comments = {"params": nvc["params"],
+                        "threadKey": nvc["threadKey"],
+                        "server": (nvc.get("server") or NVCOMMENT).rstrip("/")}
 
-    outputs = [[video["id"], audio["id"]]] if audio else [[video["id"]]]
-    track = ((nv.get("client") or {}).get("watchTrackId")
-             or "AAAAAAAAAA_" + str(int(time.time() * 1000)))
-
-    async def run():
-        r = await _browser.post(
-            HLS.format(video_id), params={"actionTrackId": track},
-            json={"outputs": outputs},
-            headers={"Content-Type": "application/json",
-                     "X-Access-Right-Key": key})
-        if r.status_code not in (200, 201):
-            return None
-        return ((r.json() or {}).get("data") or {}).get("contentUrl")
-
-    try:
-        url = await cached(f"h:{video_id}", 600, run)
-    except Exception:
-        url = None
-    if not url:
-        return {"error": "hls"}
-    return {"url": url}
+    return {"url": urls[0] if urls else None, "comments": comments or None}
 
 
 def remember(request: Request, video: dict) -> str:
@@ -450,6 +509,47 @@ async def api_comments(video_id: str):
     return JSONResponse({"comments": await fetch_comments(cid)})
 
 
+@app.get("/api/brute/{video_id}")
+async def api_brute(video_id: str):
+    cid = re.sub(r"[^A-Za-z0-9_]", "", video_id)
+    data = await cached(f"b:{cid}", 240, lambda: fetch_stream(cid))
+    return JSONResponse(data or {"url": None, "comments": None})
+
+
+@app.get("/hls")
+async def hls_proxy(u: str = Query(..., max_length=2000)):
+    """m3u8 とセグメントを中継し、プレイリスト内の URL を書き換える"""
+    if not u.startswith("http"):
+        return Response(status_code=404)
+    try:
+        r = await _browser.get(u, headers={"Referer": "https://www.nicovideo.jp/"})
+    except Exception:
+        return Response(status_code=502)
+    if r.status_code != 200:
+        return Response(status_code=r.status_code)
+
+    ctype = r.headers.get("content-type", "")
+    if "mpegurl" in ctype or u.split("?")[0].endswith(".m3u8"):
+        lines = []
+        for line in r.text.splitlines():
+            if not line or line.startswith("#"):
+                if 'URI="' in line:
+                    pre, _, rest = line.partition('URI="')
+                    inner, _, tail = rest.partition('"')
+                    lines.append(f'{pre}URI="/hls?u={quote(urljoin(u, inner), safe="")}"{tail}')
+                else:
+                    lines.append(line)
+                continue
+            lines.append("/hls?u=" + quote(urljoin(u, line), safe=""))
+        return Response("\n".join(lines),
+                        media_type="application/vnd.apple.mpegurl",
+                        headers={"Cache-Control": "no-store"})
+
+    return Response(content=r.content,
+                    media_type=ctype or "video/mp2t",
+                    headers={"Cache-Control": "public, max-age=3600"})
+
+
 @app.get("/history", response_class=HTMLResponse)
 async def history_page(request: Request):
     try:
@@ -476,17 +576,17 @@ async def thumb(u: str = Query("", max_length=400)):
     async def run():
         try:
             r = await _client.get(u)
-            if r.status_code == 200 and r.content:
+            if r.status_code == 200:
                 return r.content
         except Exception:
             pass
-        return b""
+        return None
 
-    body = await cached(f"t:{u}", 60 * 60 * 12, run)
-    if not body:
-        return Response(status_code=404)
-    return Response(body, media_type="image/jpeg",
-                    headers={"Cache-Control": "public, max-age=43200"})
+    data = await cached("t:" + u, 43200, run)
+    if data:
+        return Response(content=data, media_type="image/jpeg",
+                        headers={"Cache-Control": "public, max-age=43200"})
+    return Response(status_code=404)
 
 
 @app.get("/healthz")
