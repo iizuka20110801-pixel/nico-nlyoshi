@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}ランキング - ニコ動ビューア{% endblock %}
+{% block title %}ランキング - ニコょし{% endblock %}
 {% block content %}
 <h2>ランキング</h2>
 <div class="chips">
@@ -14,10 +14,10 @@
   {% endfor %}
 </div>
 <div class="grid">
-  {% for v in items %}
+  {% for v in videos %}
   <a class="card" href="/watch/{{ v.id }}">
     <div class="thumb">
-      <img loading="lazy" src="{{ v.thumb }}" alt="">
+      <img loading="lazy" src="{{ v.thumb }}" alt="" onerror="this.style.visibility='hidden'">
       <span class="dur">{{ v.seconds|duration }}</span>
       <span class="rank">{{ loop.index }}</span>
     </div>
