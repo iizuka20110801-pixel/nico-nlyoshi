@@ -1,0 +1,20 @@
+.player{position:relative;width:100%;padding-top:56.25%;height:0;background:#000;
+  border-radius:10px;overflow:hidden;border:1px solid var(--line)}
+.player .poster{position:absolute;top:0;left:0;width:100%;height:100%;object-fit:cover;z-index:0}
+.player video{position:absolute;top:0;left:0;width:100%;height:100%;background:#000;z-index:1}
+.player iframe{position:absolute;top:0;left:0;width:100%;height:100%;border:0;z-index:1}
+.danmaku-layer{position:absolute;top:0;left:0;width:100%;height:100%;overflow:hidden;
+  pointer-events:none;z-index:3}
+.dm{position:absolute;white-space:nowrap;font-weight:800;color:#fff;line-height:1.2;
+  text-shadow:0 0 3px #000,0 0 3px #000,0 0 3px #000,1px 1px 2px #000;will-change:transform}
+.dmbox{display:flex;gap:10px;align-items:center;margin:10px 0 0;flex-wrap:wrap}
+.dmbox .chip{cursor:pointer;background:var(--panel)}
+.note.bad{color:#f88}
+#log{white-space:pre-wrap;font:11px/1.5 ui-monospace,monospace;color:var(--dim);
+  background:var(--panel);border:1px solid var(--line);border-radius:8px;
+  padding:8px;margin:10px 0 0;max-height:120px;overflow:auto}
+.vtitle{font-size:18px;margin:14px 0 6px}
+.vsub{display:flex;gap:14px;flex-wrap:wrap;color:var(--dim);font-size:13px}
+.tags{display:flex;gap:8px;flex-wrap:wrap;margin:14px 0}
+.tags a{background:var(--panel);border:1px solid var(--line);border-radius:999px;
+  padding:4px 10px;font-size:12px}
