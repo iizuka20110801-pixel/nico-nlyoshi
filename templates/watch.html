@@ -1,24 +1,27 @@
 {% extends "base.html" %}
 {% block title %}{{ video.title }} - ニコ動ビューア{% endblock %}
 {% block content %}
-<div class="player">
-  <iframe src="{{ embed }}?autoplay=1" allowfullscreen
-          allow="autoplay; fullscreen; encrypted-media"
+<div class="player" id="player">
+  <iframe id="frame" src="{{ embed }}?jsapi=1&playerId=1&autoplay=1"
+          allowfullscreen allow="autoplay; fullscreen; encrypted-media"
           referrerpolicy="strict-origin-when-cross-origin"></iframe>
+  <div class="danmaku-layer" id="layer"></div>
+</div>
+<div class="dmbox">
+  <button id="toggle" class="chip on">コメント ON</button>
+  <span class="note" id="cstate">コメント読み込み中…</span>
 </div>
 <h1 class="vtitle">{{ video.title }}</h1>
 <div class="vsub">
   <span>{{ video.views|count }}回再生</span>
   <span>{{ video.comments|count }}コメント</span>
   <span>{{ video.mylists|count }}マイリスト</span>
-  <span>{{ video.likes|count }}いいね</span>
+  {% if video.likes %}<span>{{ video.likes|count }}いいね</span>{% endif %}
   <span>{{ video.start|date }}</span>
 </div>
 {% if video.tags %}
 <div class="tags">
-  {% for t in video.tags %}
-  <a href="/search?q={{ t|urlencode }}">{{ t }}</a>
-  {% endfor %}
+  {% for t in video.tags %}<a href="/search?q={{ t|urlencode }}">{{ t }}</a>{% endfor %}
 </div>
 {% endif %}
 <p class="note"><a href="https://www.nicovideo.jp/watch/{{ video.id }}" target="_blank" rel="noopener">ニコニコ動画で開く</a></p>
@@ -29,7 +32,7 @@
   {% for v in related %}
   <a class="card" href="/watch/{{ v.id }}">
     <div class="thumb">
-      <img loading="lazy" src="{{ v.thumb }}" alt="">
+      <img loading="lazy" src="{{ v.thumb }}" alt="" onerror="this.style.visibility='hidden'">
       <span class="dur">{{ v.seconds|duration }}</span>
     </div>
     <div class="meta">
@@ -40,4 +43,113 @@
   {% endfor %}
 </div>
 {% endif %}
+
+<script>
+(() => {
+  const VID = {{ video.id|tojson }};
+  const frame = document.getElementById('frame');
+  const layer = document.getElementById('layer');
+  const state = document.getElementById('cstate');
+  const toggle = document.getElementById('toggle');
+
+  let comments = [];
+  let shown = false;
+  let now = 0, prev = 0;
+  let cursor = 0;
+  let lanes = [];
+  const LANES = 12;
+
+  const COLORS = {red:'#ff5b5b', pink:'#ff8fd0', orange:'#ffab5b', yellow:'#ffe14d',
+                  green:'#7ee787', cyan:'#5be1e1', blue:'#6aa8ff', purple:'#c58bff',
+                  black:'#222', white:'#fff'};
+
+  function resetLanes() { lanes = new Array(LANES).fill(0); }
+
+  function pickLane() {
+    const t = performance.now();
+    for (let i = 0; i < LANES; i++) if (lanes[i] < t) return i;
+    return Math.floor(Math.random() * LANES);
+  }
+
+  function shoot(c) {
+    const big = c.cmd.includes('big');
+    const small = c.cmd.includes('small');
+    const el = document.createElement('div');
+    el.className = 'dm';
+    el.textContent = c.body;
+    el.style.fontSize = big ? '30px' : small ? '15px' : '22px';
+
+    const colorCmd = c.cmd.find(x => COLORS[x]);
+    if (colorCmd) el.style.color = COLORS[colorCmd];
+
+    if (c.cmd.includes('ue') || c.cmd.includes('shita')) {
+      const top = c.cmd.includes('ue');
+      el.style.left = '50%';
+      el.style.transform = 'translateX(-50%)';
+      el.style.top = top ? '6%' : 'auto';
+      el.style.bottom = top ? 'auto' : '8%';
+      layer.appendChild(el);
+      el.animate([{opacity: 0}, {opacity: 1}], {duration: 120, fill: 'forwards'});
+      setTimeout(() => el.remove(), 4000);
+      return;
+    }
+
+    const lane = pickLane();
+    lanes[lane] = performance.now() + (big ? 2200 : 1500);
+    el.style.top = `${(lane / LANES) * 82 + 2}%`;
+    el.style.left = '100%';
+    layer.appendChild(el);
+    const dist = layer.clientWidth + el.offsetWidth + 20;
+    const dur = 5200 + Math.random() * 1800;
+    const anim = el.animate(
+      [{transform: 'translateX(0)'}, {transform: `translateX(-${dist}px)`}],
+      {duration: dur, easing: 'linear'});
+    anim.onfinish = () => el.remove();
+  }
+
+  function tick() {
+    if (shown) {
+      if (now < prev - 0.5) { cursor = 0; resetLanes(); }
+      while (cursor < comments.length && comments[cursor].v <= now) {
+        if (comments[cursor].v > prev - 1.2) shoot(comments[cursor]);
+        cursor++;
+      }
+    }
+    prev = now;
+    requestAnimationFrame(tick);
+  }
+
+  window.addEventListener('message', (e) => {
+    if (e.origin !== 'https://embed.nicovideo.jp') return;
+    const d = e.data || {};
+    if (d.eventName === 'playerMetadataChange' && d.data) {
+      if (typeof d.data.currentTime === 'number') now = d.data.currentTime;
+    }
+    if (d.eventName === 'error') {
+      state.textContent = 'この動画は埋め込み再生できません（ニコニコ動画で開いてください）';
+    }
+  });
+
+  toggle.addEventListener('click', () => {
+    shown = !shown;
+    toggle.classList.toggle('on', shown);
+    toggle.textContent = shown ? 'コメント ON' : 'コメント OFF';
+    if (!shown) layer.innerHTML = '';
+  });
+
+  fetch('/api/comments/' + encodeURIComponent(VID))
+    .then(r => r.json())
+    .then(d => {
+      comments = (d.comments || []).filter(c => c.body);
+      shown = true;
+      state.textContent = comments.length
+        ? `${comments.length}件のコメント`
+        : 'コメントを取得できませんでした';
+      if (!comments.length) state.textContent += '（埋め込みプレイヤー側のコメントは表示されます）';
+    })
+    .catch(() => { state.textContent = 'コメントを取得できませんでした'; });
+
+  requestAnimationFrame(tick);
+})();
+</script>
 {% endblock %}
