@@ -1,0 +1,43 @@
+:root{--bg:#0e0e11;--panel:#17171c;--line:#26262e;--fg:#e9e9ef;--dim:#9a9aa8;--acc:#ff4d6d}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.6 system-ui,"Hiragino Kaku Gothic ProN","Yu Gothic",sans-serif}
+a{color:inherit;text-decoration:none}
+header{display:flex;gap:16px;align-items:center;padding:12px 20px;background:var(--panel);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5}
+.logo{font-weight:800;font-size:18px;letter-spacing:.02em}
+.logo span{color:var(--acc)}
+.topsearch{display:flex;flex:1;max-width:520px;gap:8px}
+.topsearch input{flex:1;padding:9px 12px;border-radius:8px;border:1px solid var(--line);background:#0b0b0e;color:var(--fg)}
+button{padding:9px 14px;border-radius:8px;border:0;background:var(--acc);color:#fff;font-weight:700;cursor:pointer}
+nav{display:flex;gap:14px;font-size:14px;color:var(--dim)}
+main{padding:22px 20px 60px;max-width:1240px;margin:0 auto}
+h1,h2{font-size:19px;margin:22px 0 10px}
+.note{color:var(--dim);font-size:13px;margin:6px 0 14px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:18px}
+.grid.small{grid-template-columns:repeat(auto-fill,minmax(180px,1fr))}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden;transition:transform .12s,border-color .12s}
+.card:hover{transform:translateY(-2px);border-color:var(--acc)}
+.thumb{position:relative;aspect-ratio:16/9;background:#000}
+.thumb img{width:100%;height:100%;object-fit:cover;display:block}
+.dur{position:absolute;right:6px;bottom:6px;background:rgba(0,0,0,.8);padding:1px 6px;border-radius:4px;font-size:12px}
+.rank{position:absolute;left:6px;top:6px;background:var(--acc);color:#fff;font-weight:800;font-size:12px;padding:2px 8px;border-radius:4px}
+.meta{padding:9px 11px 12px}
+.title{font-size:13.5px;font-weight:600;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.sub{color:var(--dim);font-size:12px;margin-top:5px}
+.filters{display:flex;gap:10px;align-items:center;margin-bottom:16px;flex-wrap:wrap}
+select{padding:8px 10px;border-radius:8px;border:1px solid var(--line);background:#0b0b0e;color:var(--fg)}
+.count{color:var(--dim);font-size:13px}
+.pager{display:flex;gap:16px;justify-content:center;margin-top:26px;color:var(--dim)}
+.pager a{color:var(--acc);font-weight:700}
+.player{position:relative;aspect-ratio:16/9;background:#000;border-radius:10px;overflow:hidden;border:1px solid var(--line)}
+.player iframe{width:100%;height:100%;border:0}
+.vtitle{font-size:18px;margin:14px 0 6px}
+.vsub{display:flex;gap:14px;flex-wrap:wrap;color:var(--dim);font-size:13px}
+.tags{display:flex;gap:8px;flex-wrap:wrap;margin:14px 0}
+.tags a{background:var(--panel);border:1px solid var(--line);padding:3px 10px;border-radius:999px;font-size:12.5px;color:var(--dim)}
+.tags a:hover{color:var(--acc);border-color:var(--acc)}
+.chips{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
+.chip{padding:5px 12px;border-radius:999px;border:1px solid var(--line);font-size:13px;color:var(--dim)}
+.chip.on{background:var(--acc);color:#fff;border-color:var(--acc);font-weight:700}
+.hist{margin:0;padding-left:20px;line-height:2}
+.hist a:hover{color:var(--acc)}
+footer{color:var(--dim);font-size:12px;text-align:center;padding:26px 20px;border-top:1px solid var(--line)}
