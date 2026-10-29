@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}{{ video.title }} - ニコ動ビューア{% endblock %}
+{% block content %}
+<div class="player">
+  <iframe src="{{ embed }}?autoplay=1" allowfullscreen
+          allow="autoplay; fullscreen; encrypted-media"
+          referrerpolicy="strict-origin-when-cross-origin"></iframe>
+</div>
+<h1 class="vtitle">{{ video.title }}</h1>
+<div class="vsub">
+  <span>{{ video.views|count }}回再生</span>
+  <span>{{ video.comments|count }}コメント</span>
+  <span>{{ video.mylists|count }}マイリスト</span>
+  <span>{{ video.likes|count }}いいね</span>
+  <span>{{ video.start|date }}</span>
+</div>
+{% if video.tags %}
+<div class="tags">
+  {% for t in video.tags %}
+  <a href="/search?q={{ t|urlencode }}">{{ t }}</a>
+  {% endfor %}
+</div>
+{% endif %}
+<p class="note"><a href="https://www.nicovideo.jp/watch/{{ video.id }}" target="_blank" rel="noopener">ニコニコ動画で開く</a></p>
+
+{% if related %}
+<h2>関連動画</h2>
+<div class="grid small">
+  {% for v in related %}
+  <a class="card" href="/watch/{{ v.id }}">
+    <div class="thumb">
+      <img loading="lazy" src="{{ v.thumb }}" alt="">
+      <span class="dur">{{ v.seconds|duration }}</span>
+    </div>
+    <div class="meta">
+      <div class="title">{{ v.title }}</div>
+      <div class="sub">{{ v.views|count }}回再生</div>
+    </div>
+  </a>
+  {% endfor %}
+</div>
+{% endif %}
+{% endblock %}
