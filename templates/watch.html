@@ -2,16 +2,14 @@
 {% block title %}{{ video.title }} - ニコ動ビューア{% endblock %}
 {% block content %}
 <div class="player" id="player">
-  {% if video.thumb %}<img class="poster" src="{{ video.thumb }}" alt="">{% endif %}
-  <iframe id="frame" src="{{ embed }}?jsapi=1&playerId=1&autoplay=1"
-          allowfullscreen webkit-playsinline playsinline
-          allow="autoplay; fullscreen; encrypted-media"
-          referrerpolicy="strict-origin-when-cross-origin"></iframe>
+  {% if video.thumb %}<img class="poster" id="poster" src="{{ video.thumb }}" alt="">{% endif %}
+  <video id="vid" playsinline webkit-playsinline controls preload="metadata"
+         {% if video.thumb %}poster="{{ video.thumb }}"{% endif %}></video>
   <div class="danmaku-layer" id="layer"></div>
 </div>
 <div class="dmbox">
   <button id="toggle" class="chip on">コメント ON</button>
-  <span class="note" id="cstate">コメント読み込み中…</span>
+  <span class="note" id="cstate">プレイヤー準備中…</span>
 </div>
 <h1 class="vtitle">{{ video.title }}</h1>
 <div class="vsub">
@@ -49,7 +47,8 @@
 <script>
 (() => {
   const VID = {{ video.id|tojson }};
-  const frame = document.getElementById('frame');
+  const player = document.getElementById('player');
+  const vid = document.getElementById('vid');
   const layer = document.getElementById('layer');
   const state = document.getElementById('cstate');
   const toggle = document.getElementById('toggle');
@@ -57,14 +56,20 @@
   const IS_IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
     (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 
-  if (IS_IOS) {
-    frame.src = frame.src.replace('&autoplay=1', '');
-  }
+  const NV = 'https://nvapi.nicovideo.jp/v1/watch/' + encodeURIComponent(VID);
+  const HDR = {
+    'X-Frontend-Id': '6',
+    'X-Frontend-Version': '0',
+    'X-Request-With': 'https://www.nicovideo.jp'
+  };
+  const TRACK = 'AAAAAAAAAA_' + Date.now();
 
   let comments = [];
-  let shown = false;
-  let now = 0, prev = 0;
+  let shown = true;
   let cursor = 0;
+  let prev = 0;
+  let usingIframe = false;
+  let now = 0;
   let lanes = [];
   const LANES = 10;
 
@@ -109,14 +114,14 @@
     el.style.left = '100%';
     layer.appendChild(el);
     const dist = layer.clientWidth + el.offsetWidth + 20;
-    const dur = 5200 + Math.random() * 1800;
     const anim = el.animate(
       [{transform: 'translateX(0)'}, {transform: `translateX(-${dist}px)`}],
-      {duration: dur, easing: 'linear'});
+      {duration: 5200 + Math.random() * 1800, easing: 'linear'});
     anim.onfinish = () => el.remove();
   }
 
   function tick() {
+    if (!usingIframe) now = vid.currentTime || 0;
     if (shown) {
       if (now < prev - 0.5) { cursor = 0; resetLanes(); }
       while (cursor < comments.length && comments[cursor].v <= now) {
@@ -128,16 +133,113 @@
     requestAnimationFrame(tick);
   }
 
-  window.addEventListener('message', (e) => {
-    if (e.origin !== 'https://embed.nicovideo.jp') return;
-    const d = e.data || {};
-    if (d.eventName === 'playerMetadataChange' && d.data) {
-      if (typeof d.data.currentTime === 'number') now = d.data.currentTime;
+  function setComments(list) {
+    comments = (list || []).filter(c => c && c.body).sort((a, b) => a.v - b.v);
+    state.textContent = comments.length ? `${comments.length}件のコメント` : '';
+  }
+
+  /* --- コメント：まずブラウザから nvcomment を叩く --- */
+  async function loadCommentsClient(meta) {
+    const nvc = ((meta || {}).comment || {}).nvComment || {};
+    if (!nvc.params || !nvc.threadKey) throw new Error('no nvComment');
+    const server = (nvc.server || 'https://public.nvcomment.nicovideo.jp').replace(/\/$/, '');
+    const res = await fetch(server + '/v1/threads?_frontendId=6', {
+      method: 'POST',
+      headers: Object.assign({}, HDR, {'Content-Type': 'application/json'}),
+      body: JSON.stringify({params: nvc.params, threadKey: nvc.threadKey, additionals: {}})
+    });
+    if (!res.ok) throw new Error('comment ' + res.status);
+    const j = await res.json();
+    const out = [];
+    for (const t of ((j.data || {}).threads || [])) {
+      for (const c of (t.comments || [])) {
+        out.push({v: (c.vposMs || 0) / 1000, body: c.body || '', cmd: c.commands || []});
+      }
     }
-    if (d.eventName === 'error') {
-      state.textContent = 'この動画は埋め込み再生できません（ニコニコ動画で開いてください）';
+    setComments(out);
+  }
+
+  /* --- ストリームURL取得（ブラウザ側） --- */
+  async function getStreamUrl(meta) {
+    const domand = ((meta.media || {}).domand) || {};
+    const key = domand.accessRightKey;
+    if (!key) throw new Error('no rights');
+    const videos = (domand.videos || []).filter(v => v.id);
+    const audios = (domand.audios || []).filter(a => a.id);
+    if (!videos.length) throw new Error('no quality');
+    videos.sort((a, b) => (a.height || 0) - (b.height || 0));
+    const under = videos.filter(v => (v.height || 0) <= 720);
+    const v = (under.length ? under : videos).slice(-1)[0];
+    audios.sort((a, b) => (a.bitRate || 0) - (b.bitRate || 0));
+    const a = audios.slice(-1)[0];
+    const outputs = a ? [[v.id, a.id]] : [[v.id]];
+
+    const res = await fetch(NV + '/access-rights/hls?actionTrackId=' + TRACK, {
+      method: 'POST',
+      headers: Object.assign({}, HDR, {
+        'Content-Type': 'application/json',
+        'X-Access-Right-Key': key
+      }),
+      body: JSON.stringify({outputs})
+    });
+    if (!res.ok) throw new Error('hls ' + res.status);
+    const j = await res.json();
+    const url = ((j.data || {}).contentUrl);
+    if (!url) throw new Error('no url');
+    return url;
+  }
+
+  function playUrl(url) {
+    const start = () => { vid.play().catch(() => {}); };
+
+    if (vid.canPlayType('application/vnd.apple.mpegurl')) {
+      vid.src = url;
+      vid.addEventListener('loadedmetadata', start, {once: true});
+      vid.addEventListener('error', useIframe, {once: true});
+      return;
     }
-  });
+
+    const boot = () => {
+      if (!window.Hls || !window.Hls.isSupported()) return useIframe();
+      const hls = new window.Hls({maxBufferLength: 30});
+      hls.on(window.Hls.Events.ERROR, (_, d) => {
+        if (d.fatal) { hls.destroy(); useIframe(); }
+      });
+      hls.loadSource(url);
+      hls.attachMedia(vid);
+      hls.on(window.Hls.Events.MANIFEST_PARSED, start);
+    };
+
+    if (window.Hls) return boot();
+    const s = document.createElement('script');
+    s.src = 'https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js';
+    s.onload = boot;
+    s.onerror = useIframe;
+    document.head.appendChild(s);
+  }
+
+  function useIframe() {
+    if (usingIframe) return;
+    usingIframe = true;
+    layer.innerHTML = '';
+    vid.remove();
+    const frame = document.createElement('iframe');
+    frame.allow = 'autoplay; fullscreen; encrypted-media';
+    frame.allowFullscreen = true;
+    frame.referrerPolicy = 'strict-origin-when-cross-origin';
+    frame.src = 'https://embed.nicovideo.jp/watch/' + encodeURIComponent(VID) +
+      '?jsapi=1&playerId=1' + (IS_IOS ? '' : '&autoplay=1');
+    player.appendChild(frame);
+    window.addEventListener('message', (e) => {
+      if (e.origin !== 'https://embed.nicovideo.jp') return;
+      const d = e.data || {};
+      if (d.eventName === 'playerMetadataChange' && d.data &&
+          typeof d.data.currentTime === 'number') now = d.data.currentTime;
+      if (d.eventName === 'error') {
+        state.textContent = 'この動画は再生できません。「ニコニコ動画で開く」からどうぞ';
+      }
+    });
+  }
 
   toggle.addEventListener('click', () => {
     shown = !shown;
@@ -146,16 +248,31 @@
     if (!shown) layer.innerHTML = '';
   });
 
-  fetch('/api/comments/' + encodeURIComponent(VID))
-    .then(r => r.json())
-    .then(d => {
-      comments = (d.comments || []).filter(c => c.body);
-      shown = true;
-      state.textContent = comments.length
-        ? `${comments.length}件のコメント`
-        : 'コメントを取得できませんでした';
-    })
-    .catch(() => { state.textContent = 'コメントを取得できませんでした'; });
+  (async () => {
+    let meta = null;
+    try {
+      const r = await fetch(NV + '?actionTrackId=' + TRACK, {headers: HDR});
+      if (r.ok) meta = (await r.json()).data;
+    } catch (e) {}
+
+    if (meta) loadCommentsClient(meta).catch(() => {});
+    else fetch('/api/comments/' + encodeURIComponent(VID))
+      .then(r => r.json()).then(d => setComments(d.comments)).catch(() => {});
+
+    if (meta) {
+      try {
+        playUrl(await getStreamUrl(meta));
+        return;
+      } catch (e) {}
+    }
+
+    try {
+      const d = await fetch('/api/stream/' + encodeURIComponent(VID)).then(r => r.json());
+      if (d && d.url) { playUrl(d.url); return; }
+    } catch (e) {}
+
+    useIframe();
+  })();
 
   requestAnimationFrame(tick);
 })();
