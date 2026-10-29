@@ -2,8 +2,10 @@
 {% block title %}{{ video.title }} - ニコ動ビューア{% endblock %}
 {% block content %}
 <div class="player" id="player">
+  {% if video.thumb %}<img class="poster" src="{{ video.thumb }}" alt="">{% endif %}
   <iframe id="frame" src="{{ embed }}?jsapi=1&playerId=1&autoplay=1"
-          allowfullscreen allow="autoplay; fullscreen; encrypted-media"
+          allowfullscreen webkit-playsinline playsinline
+          allow="autoplay; fullscreen; encrypted-media"
           referrerpolicy="strict-origin-when-cross-origin"></iframe>
   <div class="danmaku-layer" id="layer"></div>
 </div>
@@ -52,12 +54,19 @@
   const state = document.getElementById('cstate');
   const toggle = document.getElementById('toggle');
 
+  const IS_IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+
+  if (IS_IOS) {
+    frame.src = frame.src.replace('&autoplay=1', '');
+  }
+
   let comments = [];
   let shown = false;
   let now = 0, prev = 0;
   let cursor = 0;
   let lanes = [];
-  const LANES = 12;
+  const LANES = 10;
 
   const COLORS = {red:'#ff5b5b', pink:'#ff8fd0', orange:'#ffab5b', yellow:'#ffe14d',
                   green:'#7ee787', cyan:'#5be1e1', blue:'#6aa8ff', purple:'#c58bff',
@@ -77,7 +86,7 @@
     const el = document.createElement('div');
     el.className = 'dm';
     el.textContent = c.body;
-    el.style.fontSize = big ? '30px' : small ? '15px' : '22px';
+    el.style.fontSize = big ? '28px' : small ? '14px' : '20px';
 
     const colorCmd = c.cmd.find(x => COLORS[x]);
     if (colorCmd) el.style.color = COLORS[colorCmd];
@@ -145,7 +154,6 @@
       state.textContent = comments.length
         ? `${comments.length}件のコメント`
         : 'コメントを取得できませんでした';
-      if (!comments.length) state.textContent += '（埋め込みプレイヤー側のコメントは表示されます）';
     })
     .catch(() => { state.textContent = 'コメントを取得できませんでした'; });
 
