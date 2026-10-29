@@ -1,6 +1,10 @@
 {% extends "base.html" %}
 {% block title %}{{ q or "検索" }} - ニコ動ビューア{% endblock %}
 {% block content %}
+{% if missing %}
+<h2>動画が見つかりません</h2>
+<p class="note">ID: {{ missing }} / 削除済み・非公開・インデックス未収載の可能性があります。</p>
+{% endif %}
 {% if q %}
 <form action="/search" method="get" class="filters">
   <input type="hidden" name="q" value="{{ q }}">
@@ -18,10 +22,10 @@
   <span class="count">約 {{ result.total|count }} 件</span>
 </form>
 <div class="grid">
-  {% for v in result.items %}
+  {% for v in result.videos %}
   <a class="card" href="/watch/{{ v.id }}">
     <div class="thumb">
-      <img loading="lazy" src="{{ v.thumb }}" alt="">
+      <img loading="lazy" src="{{ v.thumb }}" alt="" onerror="this.style.visibility='hidden'">
       <span class="dur">{{ v.seconds|duration }}</span>
     </div>
     <div class="meta">
