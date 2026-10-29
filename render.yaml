@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: nico-viewer-plus
+    runtime: docker
+    plan: free
+    region: singapore
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /healthz
+    envVars:
+      - key: PYTHONUNBUFFERED
+        value: "1"
