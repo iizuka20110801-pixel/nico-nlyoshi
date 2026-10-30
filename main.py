@@ -59,6 +59,63 @@ NICO_HEADERS = {
     "Referer": "https://www.nicovideo.jp/",
 }
 
+WATCH_SHELL = """<!doctype html>
+<html lang="ja"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>__TITLE__ - ニコ動ビューア</title>
+<style>
+:root{--bg:#0b0b0e;--fg:#e8e8ef;--dim:#8a8a99;--panel:#17171d;--line:#2a2a33;--acc:#e4007f}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);
+ font-family:system-ui,-apple-system,"Hiragino Sans","Noto Sans JP",sans-serif}
+a{color:inherit;text-decoration:none}
+header{display:flex;gap:16px;align-items:center;padding:12px 16px;border-bottom:1px solid var(--line)}
+header .brand{font-weight:800;color:var(--acc)}
+header .sp{flex:1}
+main{max-width:1000px;margin:0 auto;padding:16px}
+.player{position:relative;width:100%;padding-top:56.25%;height:0;background:#000;
+ border-radius:10px;overflow:hidden;border:1px solid var(--line)}
+.player .poster{position:absolute;top:0;left:0;width:100%;height:100%;object-fit:cover;z-index:0}
+.player video{position:absolute;top:0;left:0;width:100%;height:100%;background:#000;z-index:1}
+.player iframe{position:absolute;top:0;left:0;width:100%;height:100%;border:0;z-index:1}
+.danmaku-layer{position:absolute;top:0;left:0;width:100%;height:100%;overflow:hidden;
+ pointer-events:none;z-index:3}
+.dm{position:absolute;white-space:nowrap;font-weight:800;color:#fff;line-height:1.2;
+ text-shadow:0 0 3px #000,0 0 3px #000,0 0 3px #000,1px 1px 2px #000;will-change:transform}
+.dmbox{display:flex;gap:10px;align-items:center;margin:10px 0 0;flex-wrap:wrap}
+.dmbox .chip{cursor:pointer;background:var(--panel);border:1px solid var(--line);
+ border-radius:999px;padding:5px 12px;font-size:12px;color:var(--fg)}
+.note{color:var(--dim);font-size:13px}
+.note.bad{color:#f88}
+#log{white-space:pre-wrap;font:11px/1.5 ui-monospace,monospace;color:var(--dim);
+ background:var(--panel);border:1px solid var(--line);border-radius:8px;
+ padding:8px;margin:10px 0 0;max-height:120px;overflow:auto}
+.vtitle{font-size:18px;margin:14px 0 6px}
+.vsub{display:flex;gap:14px;flex-wrap:wrap;color:var(--dim);font-size:13px}
+.tags{display:flex;gap:8px;flex-wrap:wrap;margin:14px 0}
+.tags a{background:var(--panel);border:1px solid var(--line);border-radius:999px;
+ padding:4px 10px;font-size:12px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:14px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.card img{width:100%;aspect-ratio:16/9;object-fit:cover;display:block}
+.card .meta{padding:8px}
+.card .title{font-size:13px;line-height:1.4;max-height:3.6em;overflow:hidden}
+.card .sub{color:var(--dim);font-size:11px;margin-top:4px}
+</style>
+</head><body>
+<header><a class="brand" href="/">ニコ動ビューア</a><a href="/ranking">ランキング</a>
+<a href="/history">履歴</a><span class="sp"></span></header>
+<main>
+<div class="player" id="player"></div>
+<pre id="log"></pre>
+<div id="body"></div>
+</main>
+<script type="application/json" id="vd">__DATA__</script>
+<script src="/static/watch.js"></script>
+</body></html>
+"""
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -175,7 +232,6 @@ def build_from_nv(video_id: str, video: dict, tags: list[str]) -> dict:
 
 
 def scan_m3u8(node, out: list[str]) -> list[str]:
-    """どんな形のJSONでも .m3u8 を含む文字列を全部拾う（力づく）"""
     if node is None:
         return out
     if isinstance(node, str):
@@ -263,7 +319,6 @@ async def nv_watch(video_id: str) -> dict | None:
 
 
 async def guest_watch(video_id: str) -> dict | None:
-    """視聴ページが内部で叩いている v3_guest を直叩きする（最終手段）"""
     track = "AAAAAAAAAA_" + str(int(time.time() * 1000))
 
     async def run():
@@ -366,7 +421,6 @@ async def fetch_comments(video_id: str) -> list[dict]:
 
 
 async def fetch_stream(video_id: str) -> dict:
-    """HLS の URL を取れる経路を全部試す（力づく）"""
     urls: list[str] = []
     comments: dict = {}
 
@@ -383,7 +437,6 @@ async def fetch_stream(video_id: str) -> dict:
         if urls:
             break
 
-    # nvapi の access-rights/hls 経由
     if not urls:
         api = await nv_watch(video_id)
         domand = ((api or {}).get("media") or {}).get("domand") or {}
@@ -489,106 +542,13 @@ async def watch_page(request: Request, video_id: str):
     if video["tags"]:
         related = await search(video["tags"][0], targets="tagsExact", limit=12)
 
-    resp = templates.TemplateResponse("watch.html", ctx(
-        request, video=video, embed=EMBED.format(video_id),
-        related=[x for x in related["videos"] if x["id"] != video_id][:12]))
-    resp.set_cookie("history", remember(request, video), max_age=60 * 60 * 24 * 90,
-                    httponly=True, samesite="lax")
-    return resp
-
-
-@app.get("/api/stream/{video_id}")
-async def api_stream(video_id: str):
-    cid = re.sub(r"[^A-Za-z0-9_]", "", video_id)
-    return JSONResponse(await fetch_stream(cid))
-
-
-@app.get("/api/comments/{video_id}")
-async def api_comments(video_id: str):
-    cid = re.sub(r"[^A-Za-z0-9_]", "", video_id)
-    return JSONResponse({"comments": await fetch_comments(cid)})
-
-
-@app.get("/api/brute/{video_id}")
-async def api_brute(video_id: str):
-    cid = re.sub(r"[^A-Za-z0-9_]", "", video_id)
-    data = await cached(f"b:{cid}", 240, lambda: fetch_stream(cid))
-    return JSONResponse(data or {"url": None, "comments": None})
-
-
-@app.get("/hls")
-async def hls_proxy(u: str = Query(..., max_length=2000)):
-    """m3u8 とセグメントを中継し、プレイリスト内の URL を書き換える"""
-    if not u.startswith("http"):
-        return Response(status_code=404)
-    try:
-        r = await _browser.get(u, headers={"Referer": "https://www.nicovideo.jp/"})
-    except Exception:
-        return Response(status_code=502)
-    if r.status_code != 200:
-        return Response(status_code=r.status_code)
-
-    ctype = r.headers.get("content-type", "")
-    if "mpegurl" in ctype or u.split("?")[0].endswith(".m3u8"):
-        lines = []
-        for line in r.text.splitlines():
-            if not line or line.startswith("#"):
-                if 'URI="' in line:
-                    pre, _, rest = line.partition('URI="')
-                    inner, _, tail = rest.partition('"')
-                    lines.append(f'{pre}URI="/hls?u={quote(urljoin(u, inner), safe="")}"{tail}')
-                else:
-                    lines.append(line)
-                continue
-            lines.append("/hls?u=" + quote(urljoin(u, line), safe=""))
-        return Response("\n".join(lines),
-                        media_type="application/vnd.apple.mpegurl",
-                        headers={"Cache-Control": "no-store"})
-
-    return Response(content=r.content,
-                    media_type=ctype or "video/mp2t",
-                    headers={"Cache-Control": "public, max-age=3600"})
-
-
-@app.get("/history", response_class=HTMLResponse)
-async def history_page(request: Request):
-    try:
-        hist = json.loads(unquote(request.cookies.get("history", "[]")))
-    except Exception:
-        hist = []
-    return templates.TemplateResponse("search.html", ctx(
-        request, q="", sort="view", genre="", page=1,
-        result={"videos": [], "total": 0, "error": False}, pages=0, history=hist))
-
-
-@app.get("/history/clear")
-async def clear_history():
-    resp = RedirectResponse("/history", status_code=303)
-    resp.delete_cookie("history")
-    return resp
-
-
-@app.get("/thumb")
-async def thumb(u: str = Query("", max_length=400)):
-    if not u.startswith("https://") or ".nimg.jp/" not in u:
-        return Response(status_code=404)
-
-    async def run():
-        try:
-            r = await _client.get(u)
-            if r.status_code == 200:
-                return r.content
-        except Exception:
-            pass
-        return None
-
-    data = await cached("t:" + u, 43200, run)
-    if data:
-        return Response(content=data, media_type="image/jpeg",
-                        headers={"Cache-Control": "public, max-age=43200"})
-    return Response(status_code=404)
-
-
-@app.get("/healthz")
-async def healthz():
-    return {"ok": True}
+    data = {
+        "id": video["id"],
+        "title": video["title"],
+        "embed": EMBED.format(video_id),
+        "thumb": video["thumb"],
+        "views": video["views"],
+        "comments": video["comments"],
+        "mylists": video["mylists"],
+        "likes": video["likes"],
+        "sta
