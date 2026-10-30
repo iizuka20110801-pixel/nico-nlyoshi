@@ -4,7 +4,7 @@ import html as html_lib
 import json
 import re
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta, timezone
 from urllib.parse import quote
 
 import httpx
@@ -48,13 +48,29 @@ _client = httpx.AsyncClient(timeout=12.0, headers={"User-Agent": UA},
 _browser = httpx.AsyncClient(timeout=15.0, headers=NICO_HEADERS,
                              follow_redirects=True)
 
-_cache: dict[str, tuple[float, object]] = {}
-_locks: dict[str, asyncio.Lock] = {}
+_cache = {}
+_locks = {}
+_warm_at = 0.0
+_warm_lock = asyncio.Lock()
 
 
 async def close():
     await _client.aclose()
     await _browser.aclose()
+
+
+async def warmup():
+    global _warm_at
+    if time.time() - _warm_at < 1800:
+        return
+    async with _warm_lock:
+        if time.time() - _warm_at < 1800:
+            return
+        try:
+            await _browser.get("https://www.nicovideo.jp/")
+            _warm_at = time.time()
+        except Exception:
+            pass
 
 
 def thumb_url(url):
@@ -185,32 +201,39 @@ async def fetch_one(video_id):
     return None
 
 
-async def nv_watch(video_id):
-    async def run():
-        r = await _browser.get(
-            NVAPI.format(video_id),
-            params={"actionTrackId": "AAAAAAAAAA_" + str(int(time.time() * 1000))})
-        if r.status_code != 200:
-            return None
-        return (r.json() or {}).get("data")
-
-    try:
-        return await cached("n:" + video_id, 300, run)
-    except Exception:
-        return None
-
-
 async def guest_watch(video_id):
     async def run():
-        r = await _browser.get(GUEST.format(video_id), params={
-            "actionTrackId": "AAAAAAAAAA_" + str(int(time.time() * 1000)),
-            "t": str(int(time.time() * 1000))})
+        await warmup()
+        r = await _browser.get(
+            GUEST.format(video_id),
+            params={"actionTrackId": "AAAAAAAAAA_" + str(int(time.time() * 1000)),
+                    "t": str(int(time.time() * 1000))},
+            headers={"Accept": "application/json",
+                     "X-Client-Os-Type": "others"})
         if r.status_code != 200:
             return None
         return (r.json() or {}).get("data")
 
     try:
         return await cached("g:" + video_id, 300, run)
+    except Exception:
+        return None
+
+
+async def nv_watch(video_id):
+    async def run():
+        await warmup()
+        r = await _browser.get(
+            NVAPI.format(video_id),
+            params={"actionTrackId": "AAAAAAAAAA_" + str(int(time.time() * 1000))},
+            headers={"Accept": "application/json",
+                     "X-Client-Os-Type": "others"})
+        if r.status_code != 200:
+            return None
+        return (r.json() or {}).get("data")
+
+    try:
+        return await cached("n:" + video_id, 300, run)
     except Exception:
         return None
 
@@ -345,3 +368,25 @@ async def fetch_stream(video_id):
                         "server": (nvc.get("server") or NVCOMMENT).rstrip("/")}
 
     return {"url": urls[0] if urls else None, "comments": comments or None}
+
+
+async def diag(video_id):
+    out = {}
+    try:
+        r = await _browser.get("https://www.nicovideo.jp/")
+        out["warmup"] = [r.status_code, len(_browser.cookies)]
+    except Exception as e:
+        out["warmup"] = ["ERR", repr(e)[:140]]
+
+    track = "AAAAAAAAAA_" + str(int(time.time() * 1000))
+    for name, url, params in (
+        ("guest", GUEST.format(video_id), {"actionTrackId": track}),
+        ("nvapi", NVAPI.format(video_id), {"actionTrackId": track}),
+        ("watch", WATCH.format(video_id), None),
+    ):
+        try:
+            r = await _browser.get(url, params=params)
+            out[name] = [r.status_code, r.text[:220].replace("\n", " ")]
+        except Exception as e:
+            out[name] = ["ERR", repr(e)[:140]]
+    return out
