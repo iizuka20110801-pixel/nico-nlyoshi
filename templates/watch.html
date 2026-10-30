@@ -2,53 +2,14 @@
 {% block title %}{{ video.title }} - ニコ動ビューア %}
 {% block content %}
 <link rel="stylesheet" href="/static/watch.css">
-
-<div class="player" id="player" data-vid="{{ video.id }}" data-embed="{{ embed }}">
-  {% if video.thumb %}<img class="poster" id="poster" src="{{ video.thumb }}" alt="">{% endif %}
-  <video id="vid" playsinline webkit-playsinline controls preload="metadata"
-         {% if video.thumb %}poster="{{ video.thumb }}"{% endif %}></video>
-  <div class="danmaku-layer" id="layer"></div>
-</div>
-
-<div class="dmbox">
-  <button id="toggle" class="chip on">コメント ON</button>
-  <span class="note" id="cstate">プレイヤー準備中…</span>
-  <a class="chip" href="{{ embed }}" target="_blank" rel="noopener">埋め込みで開く</a>
-  <a class="chip" href="https://www.nicovideo.jp/watch/{{ video.id }}"
-     target="_blank" rel="noopener">ニコニコ動画で開く</a>
-</div>
-
+<div class="player" id="player"></div>
 <pre id="log"></pre>
-
-<h1 class="vtitle">{{ video.title }}</h1>
-<div class="vsub">
-  <span>{{ video.views|count }}回再生</span>
-  <span>{{ video.comments|count }}コメント</span>
-  <span>{{ video.mylists|count }}マイリスト</span>
-  {% if video.likes %}<span>{{ video.likes|count }}いいね</span>{% endif %}
-  <span>{{ video.start|date }}</span>
-</div>
-
-{% if video.tags %}
-<div class="tags">
-  {% for t in video.tags %}<a href="/search?q={{ t|urlencode }}">{{ t }}</a>{% endfor %}
-</div>
-{% endif %}
-
-{% if related %}
-<h2 class="vtitle">関連動画</h2>
-<div class="grid">
-  {% for v in related %}
-  <a class="card" href="/watch/{{ v.id }}">
-    <img src="{{ v.thumb }}" alt="" loading="lazy">
-    <div class="meta">
-      <div class="title">{{ v.title }}</div>
-      <div class="sub">{{ v.views|count }}回再生</div>
-    </div>
-  </a>
-  {% endfor %}
-</div>
-{% endif %}
-
+<div id="body"></div>
+<script type="application/json" id="vd">{{ {
+  "id": video.id, "title": video.title, "embed": embed, "thumb": video.thumb,
+  "views": video.views, "comments": video.comments, "mylists": video.mylists,
+  "likes": video.likes, "start": video.start, "tags": video.tags,
+  "related": related
+} | tojson }}</script>
 <script src="/static/watch.js"></script>
 {% endblock %}
