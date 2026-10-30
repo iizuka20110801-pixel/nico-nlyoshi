@@ -20,7 +20,6 @@
       ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
   }
 
-  // --- プレイヤー DOM ---
   if (D.thumb) {
     var poster = el('img', 'poster');
     poster.src = D.thumb;
@@ -38,7 +37,6 @@
   layer.id = 'layer';
   player.appendChild(layer);
 
-  // --- 操作系 ---
   var dmbox = el('div', 'dmbox');
   var toggle = el('button', 'chip on');
   toggle.textContent = 'コメント ON';
@@ -94,7 +92,6 @@
     body.appendChild(grid);
   }
 
-  // --- ロジック ---
   var comments = [], shown = true, mode = null, now = 0, hlsLoaded = false, got = -1;
 
   function lg(t) { logbox.textContent += t + '\n'; logbox.scrollTop = 1e9; }
@@ -124,6 +121,14 @@
       if (!r.ok) throw new Error('HTTP ' + r.status);
       return r.json();
     });
+  }
+
+  function viaProxy(url) {
+    return fetch('https://api.allorigins.win/raw?url=' + encodeURIComponent(url),
+      { credentials: 'omit' }).then(function (r) {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.text();
+    }).then(function (t) { return JSON.parse(t); });
   }
 
   function guest(headers) {
@@ -324,10 +329,13 @@
   }
 
   var routes = [
-    ['guest(no-hdr)', function () { return guest({}); }],
-    ['guest(hdr)', function () { return guest(H); }],
-    ['nvapi', nvapi],
-    ['server', function () { return jget('/api/brute/' + encodeURIComponent(D.id), {}); }]
+    ['server', function () { return jget('/api/brute/' + encodeURIComponent(D.id), {}); }],
+    ['proxy-guest', function () {
+      return viaProxy('https://www.nicovideo.jp/api/watch/v3_guest/' + D.id +
+        '?actionTrackId=' + track());
+    }],
+    ['direct-guest', function () { return guest({}); }],
+    ['direct-nvapi', nvapi]
   ];
 
   function boot() {
