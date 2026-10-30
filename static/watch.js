@@ -1,13 +1,100 @@
 (function () {
+  var D = JSON.parse(document.getElementById('vd').textContent);
   var player = document.getElementById('player');
-  var VID = player.dataset.vid;
-  var EMBED = player.dataset.embed;
-  var vid = document.getElementById('vid');
-  var layer = document.getElementById('layer');
-  var state = document.getElementById('cstate');
   var logbox = document.getElementById('log');
-  var toggle = document.getElementById('toggle');
+  var body = document.getElementById('body');
 
+  function el(tag, cls) { var e = document.createElement(tag); if (cls) e.className = cls; return e; }
+  function num(x) {
+    x = +x || 0;
+    if (x >= 1e8) return (x / 1e8).toFixed(1) + '億';
+    if (x >= 1e4) return (x / 1e4).toFixed(1) + '万';
+    return x.toLocaleString();
+  }
+  function dt(s) {
+    if (!s) return '-';
+    var d = new Date(s);
+    if (isNaN(d)) return String(s);
+    var p = function (n) { return ('0' + n).slice(-2); };
+    return d.getFullYear() + '/' + p(d.getMonth() + 1) + '/' + p(d.getDate()) +
+      ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+  }
+
+  // --- プレイヤー DOM ---
+  if (D.thumb) {
+    var poster = el('img', 'poster');
+    poster.src = D.thumb;
+    player.appendChild(poster);
+  }
+  var vid = el('video');
+  vid.id = 'vid';
+  vid.controls = true;
+  vid.preload = 'metadata';
+  vid.setAttribute('playsinline', '');
+  vid.setAttribute('webkit-playsinline', '');
+  if (D.thumb) vid.poster = D.thumb;
+  player.appendChild(vid);
+  var layer = el('div', 'danmaku-layer');
+  layer.id = 'layer';
+  player.appendChild(layer);
+
+  // --- 操作系 ---
+  var dmbox = el('div', 'dmbox');
+  var toggle = el('button', 'chip on');
+  toggle.textContent = 'コメント ON';
+  var state = el('span', 'note');
+  state.textContent = 'プレイヤー準備中…';
+  var l1 = el('a', 'chip');
+  l1.href = D.embed; l1.target = '_blank'; l1.rel = 'noopener';
+  l1.textContent = '埋め込みで開く';
+  var l2 = el('a', 'chip');
+  l2.href = 'https://www.nicovideo.jp/watch/' + D.id;
+  l2.target = '_blank'; l2.rel = 'noopener';
+  l2.textContent = 'ニコニコ動画で開く';
+  dmbox.appendChild(toggle); dmbox.appendChild(state);
+  dmbox.appendChild(l1); dmbox.appendChild(l2);
+  body.appendChild(dmbox);
+
+  var h1 = el('h1', 'vtitle');
+  h1.textContent = D.title;
+  body.appendChild(h1);
+
+  var sub = el('div', 'vsub');
+  [num(D.views) + '回再生', num(D.comments) + 'コメント', num(D.mylists) + 'マイリスト']
+    .forEach(function (t) { var s = el('span'); s.textContent = t; sub.appendChild(s); });
+  if (D.likes) { var lk = el('span'); lk.textContent = num(D.likes) + 'いいね'; sub.appendChild(lk); }
+  var sd = el('span'); sd.textContent = dt(D.start); sub.appendChild(sd);
+  body.appendChild(sub);
+
+  if (D.tags && D.tags.length) {
+    var tags = el('div', 'tags');
+    D.tags.forEach(function (t) {
+      var a = el('a'); a.href = '/search?q=' + encodeURIComponent(t); a.textContent = t;
+      tags.appendChild(a);
+    });
+    body.appendChild(tags);
+  }
+
+  if (D.related && D.related.length) {
+    var h2 = el('h2', 'vtitle');
+    h2.textContent = '関連動画';
+    body.appendChild(h2);
+    var grid = el('div', 'grid');
+    D.related.forEach(function (v) {
+      var a = el('a', 'card');
+      a.href = '/watch/' + v.id;
+      var im = el('img'); im.src = v.thumb; im.loading = 'lazy';
+      var meta = el('div', 'meta');
+      var ti = el('div', 'title'); ti.textContent = v.title;
+      var su = el('div', 'sub'); su.textContent = num(v.views) + '回再生';
+      meta.appendChild(ti); meta.appendChild(su);
+      a.appendChild(im); a.appendChild(meta);
+      grid.appendChild(a);
+    });
+    body.appendChild(grid);
+  }
+
+  // --- ロジック ---
   var comments = [], shown = true, mode = null, now = 0, hlsLoaded = false, got = -1;
 
   function lg(t) { logbox.textContent += t + '\n'; logbox.scrollTop = 1e9; }
@@ -40,13 +127,13 @@
   }
 
   function guest(headers) {
-    return jget('https://www.nicovideo.jp/api/watch/v3_guest/' + VID +
+    return jget('https://www.nicovideo.jp/api/watch/v3_guest/' + D.id +
       '?actionTrackId=' + track() + '&t=' + Date.now(), headers);
   }
 
   function nvapi() {
     var trackId = track();
-    return jget('https://nvapi.nicovideo.jp/v1/watch/' + VID +
+    return jget('https://nvapi.nicovideo.jp/v1/watch/' + D.id +
       '?actionTrackId=' + trackId, H).then(function (meta) {
       var data = meta.data || {};
       var domand = (data.media || {}).domand || {};
@@ -59,10 +146,11 @@
       });
       if (!key || !videos.length) throw new Error('no access-right');
       var under = videos.filter(function (v) { return (v.height || 0) <= 720; });
-      var v = (under.length ? under : videos)[(under.length ? under : videos).length - 1];
+      var pool = under.length ? under : videos;
+      var v = pool[pool.length - 1];
       var a = audios[audios.length - 1];
       var outputs = a ? [[v.id, a.id]] : [[v.id]];
-      return fetch('https://nvapi.nicovideo.jp/v1/watch/' + VID +
+      return fetch('https://nvapi.nicovideo.jp/v1/watch/' + D.id +
         '/access-rights/hls?actionTrackId=' + ((data.client || {}).watchTrackId || trackId), {
         method: 'POST',
         headers: Object.assign({ 'Content-Type': 'application/json', 'X-Access-Right-Key': key }, H),
@@ -119,7 +207,7 @@
 
   function commentsFromServer() {
     if (got === 0) return Promise.resolve();
-    return jget('/api/comments/' + encodeURIComponent(VID), {}).then(function (j) {
+    return jget('/api/comments/' + encodeURIComponent(D.id), {}).then(function (j) {
       var list = (j.comments || []).map(function (c) {
         return { v: c.v, body: c.body, cmd: c.cmd || [] };
       });
@@ -200,10 +288,10 @@
     if (mode === 'watch') return;
     mode = 'watch';
     layer.innerHTML = '';
-    var old = document.querySelector('#player iframe');
+    var old = player.querySelector('iframe');
     if (old) old.remove();
-    var frame = document.createElement('iframe');
-    frame.src = 'https://www.nicovideo.jp/watch/' + VID;
+    var frame = el('iframe');
+    frame.src = 'https://www.nicovideo.jp/watch/' + D.id;
     frame.allowFullscreen = true;
     frame.referrerPolicy = 'strict-origin-when-cross-origin';
     player.appendChild(frame);
@@ -215,9 +303,9 @@
     if (mode === 'iframe' || mode === 'watch') return;
     mode = 'iframe';
     layer.innerHTML = '';
-    if (vid && vid.parentNode) vid.remove();
-    var frame = document.createElement('iframe');
-    frame.src = EMBED + '?jsapi=1&playerId=1&from=0';
+    if (vid.parentNode) vid.remove();
+    var frame = el('iframe');
+    frame.src = D.embed + '?jsapi=1&playerId=1&from=0';
     frame.allow = 'autoplay; fullscreen; encrypted-media';
     frame.allowFullscreen = true;
     frame.referrerPolicy = 'strict-origin-when-cross-origin';
@@ -239,12 +327,12 @@
     ['guest(no-hdr)', function () { return guest({}); }],
     ['guest(hdr)', function () { return guest(H); }],
     ['nvapi', nvapi],
-    ['server', function () { return jget('/api/brute/' + encodeURIComponent(VID), {}); }]
+    ['server', function () { return jget('/api/brute/' + encodeURIComponent(D.id), {}); }]
   ];
 
   function boot() {
     commentsFromServer();
-    var chain = Promise.resolve();
+    var chain = Promise.resolve(false);
     routes.forEach(function (route) {
       chain = chain.then(function (finished) {
         if (finished) return true;
@@ -281,12 +369,11 @@
   function spawn(c) {
     var big = c.cmd.indexOf('big') >= 0;
     var small = c.cmd.indexOf('small') >= 0;
-    var el = document.createElement('div');
-    el.className = 'dm';
-    el.textContent = c.body;
-    el.style.fontSize = big ? '26px' : (small ? '13px' : '19px');
+    var d = el('div', 'dm');
+    d.textContent = c.body;
+    d.style.fontSize = big ? '26px' : (small ? '13px' : '19px');
     var col = c.cmd.filter(function (x) { return /^#[0-9a-f]{6}$/i.test(x); })[0];
-    if (col) el.style.color = col;
+    if (col) d.style.color = col;
     var h = layer.clientHeight || 1;
     var total = Math.max(1, Math.floor(h / LANE_H));
     var lane = -1;
@@ -296,17 +383,17 @@
     if (lane < 0) return;
     var top = lane * LANE_H;
     if (c.cmd.indexOf('shita') >= 0) top = h - (lane + 1) * LANE_H;
-    el.style.top = Math.max(0, top) + 'px';
-    el.style.left = '100%';
-    layer.appendChild(el);
-    var w = el.offsetWidth || 200;
+    d.style.top = Math.max(0, top) + 'px';
+    d.style.left = '100%';
+    layer.appendChild(d);
+    var w = d.offsetWidth || 200;
     var dist = layer.clientWidth + w + 20;
     var dur = Math.max(4000, dist * 11);
     lanes[lane] = performance.now() + 1400;
-    var anim = el.animate(
+    var anim = d.animate(
       [{ transform: 'translateX(0)' }, { transform: 'translateX(-' + dist + 'px)' }],
       { duration: dur, easing: 'linear' });
-    anim.onfinish = function () { el.remove(); };
+    anim.onfinish = function () { d.remove(); };
   }
 
   var idx = 0;
