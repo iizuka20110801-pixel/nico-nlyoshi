@@ -36,6 +36,7 @@ TERMS = {"24h": 1, "week": 7, "month": 30}
 NICO_HEADERS = {
     "User-Agent": BROWSER_UA,
     "Accept-Language": "ja-JP,ja;q=0.9",
+    "Accept": "*/*",
     "X-Frontend-Id": "6",
     "X-Frontend-Version": "0",
     "X-Request-With": "https://www.nicovideo.jp",
@@ -208,8 +209,7 @@ async def guest_watch(video_id):
             GUEST.format(video_id),
             params={"actionTrackId": "AAAAAAAAAA_" + str(int(time.time() * 1000)),
                     "t": str(int(time.time() * 1000))},
-            headers={"Accept": "application/json",
-                     "X-Client-Os-Type": "others"})
+            headers={"X-Client-Os-Type": "others"})
         if r.status_code != 200:
             return None
         return (r.json() or {}).get("data")
@@ -226,8 +226,7 @@ async def nv_watch(video_id):
         r = await _browser.get(
             NVAPI.format(video_id),
             params={"actionTrackId": "AAAAAAAAAA_" + str(int(time.time() * 1000))},
-            headers={"Accept": "application/json",
-                     "X-Client-Os-Type": "others"})
+            headers={"X-Client-Os-Type": "others"})
         if r.status_code != 200:
             return None
         return (r.json() or {}).get("data")
@@ -445,7 +444,7 @@ async def raw_probe(video_id):
         r = await _browser.get(GUEST.format(video_id), params={
             "actionTrackId": "AAAAAAAAAA_" + str(int(time.time() * 1000)),
             "t": str(int(time.time() * 1000))},
-            headers={"Accept": "application/json", "X-Client-Os-Type": "others"})
+            headers={"X-Client-Os-Type": "others"})
     except Exception as e:
         return {"err": repr(e)[:200]}
     out = {"status": r.status_code}
