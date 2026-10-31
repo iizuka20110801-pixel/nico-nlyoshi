@@ -147,6 +147,7 @@ async def watch_page(request: Request, video_id: str):
         "likes": video["likes"],
         "start": video["start"],
         "tags": video["tags"],
+        "relay": nico.RELAY,
         "related": [{"id": x["id"], "title": x["title"], "thumb": x["thumb"],
                      "views": x["views"]}
                     for x in related["videos"] if x["id"] != video_id][:12],
