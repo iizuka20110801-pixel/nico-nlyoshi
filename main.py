@@ -185,6 +185,12 @@ async def api_diag(video_id: str):
     return JSONResponse(await nico.diag(cid))
 
 
+@app.get("/api/raw/{video_id}")
+async def api_raw(video_id: str):
+    cid = re.sub(r"[^A-Za-z0-9_]", "", video_id)
+    return JSONResponse(await nico.raw_probe(cid))
+
+
 @app.get("/hls")
 async def hls_proxy(u: str = Query(..., max_length=2000)):
     if not u.startswith("http"):
