@@ -42,16 +42,34 @@
   toggle.textContent = 'コメント ON';
   var state = el('span', 'note');
   state.textContent = 'プレイヤー準備中…';
-  var l1 = el('a', 'chip');
-  l1.href = D.embed; l1.target = '_blank'; l1.rel = 'noopener';
-  l1.textContent = '埋め込みで開く';
-  var l2 = el('a', 'chip');
-  l2.href = 'https://www.nicovideo.jp/watch/' + D.id;
-  l2.target = '_blank'; l2.rel = 'noopener';
-  l2.textContent = 'ニコニコ動画で開く';
-  dmbox.appendChild(toggle); dmbox.appendChild(state);
-  dmbox.appendChild(l1); dmbox.appendChild(l2);
+  dmbox.appendChild(toggle);
+  dmbox.appendChild(state);
   body.appendChild(dmbox);
+
+  var modes = el('div', 'dmbox');
+  var MODES = [
+    ['auto', '自動'], ['hls', 'HLS'], ['embed', '埋め込み'],
+    ['watch', '視聴ページ'], ['diag', '診断']
+  ];
+  var modeBtns = {};
+  MODES.forEach(function (m) {
+    var b = el('button', 'chip');
+    b.textContent = m[1];
+    b.onclick = function () {
+      Object.keys(modeBtns).forEach(function (k) {
+        modeBtns[k].classList.toggle('on', k === m[0]);
+      });
+      if (m[0] === 'hls') start(true);
+      if (m[0] === 'embed') useEmbed(true);
+      if (m[0] === 'watch') useWatchPage(true);
+      if (m[0] === 'auto') start(true);
+      if (m[0] === 'diag') showDiag();
+    };
+    modeBtns[m[0]] = b;
+    modes.appendChild(b);
+  });
+  modeBtns.auto.classList.add('on');
+  body.appendChild(modes);
 
   var h1 = el('h1', 'vtitle');
   h1.textContent = D.title;
@@ -93,6 +111,7 @@
   }
 
   var comments = [], shown = true, mode = null, now = 0, hlsLoaded = false, got = -1;
+  var started = false;
 
   function lg(t) { logbox.textContent += t + '\n'; logbox.scrollTop = 1e9; }
   function say(t, bad) { state.textContent = t; state.className = 'note' + (bad ? ' bad' : ''); }
@@ -116,19 +135,21 @@
 
   function track() { return 'AAAAAAAAAA_' + Date.now(); }
 
-  function jget(url, headers) {
-    return fetch(url, { headers: headers || {}, credentials: 'omit' }).then(function (r) {
+  function jget(url, headers, ms) {
+    var ac = window.AbortController ? new AbortController() : null;
+    var t = setTimeout(function () { if (ac) ac.abort(); }, ms || 8000);
+    return fetch(url, {
+      headers: headers || {}, credentials: 'omit',
+      signal: ac ? ac.signal : undefined
+    }).then(function (r) {
+      clearTimeout(t);
       if (!r.ok) throw new Error('HTTP ' + r.status);
       return r.json();
-    });
+    }, function (e) { clearTimeout(t); throw e; });
   }
 
   function viaProxy(url) {
-    return fetch('https://api.allorigins.win/raw?url=' + encodeURIComponent(url),
-      { credentials: 'omit' }).then(function (r) {
-      if (!r.ok) throw new Error('HTTP ' + r.status);
-      return r.text();
-    }).then(function (t) { return JSON.parse(t); });
+    return jget('https://api.allorigins.win/raw?url=' + encodeURIComponent(url), {}, 10000);
   }
 
   function guest(headers) {
@@ -250,7 +271,7 @@
       vid.addEventListener('error', onBad);
       vid.src = url;
       vid.load();
-      setTimeout(function () { finish(false); }, 9000);
+      setTimeout(function () { finish(false); }, 8000);
     });
   }
 
@@ -260,14 +281,14 @@
       return new Promise(function (res) {
         var done = false;
         function finish(ok) { if (!done) { done = true; res(ok); } }
-        var hls = new window.Hls({ maxBufferLength: 30 });
+        var hls = new window.Hls({ maxBufferLength: 20, manifestLoadingTimeOut: 8000 });
         hls.on(window.Hls.Events.MANIFEST_PARSED, function () { finish(true); });
         hls.on(window.Hls.Events.ERROR, function (_, d) {
           if (d.fatal) { try { hls.destroy(); } catch (e) {} finish(false); }
         });
         hls.loadSource(url);
         hls.attachMedia(vid);
-        setTimeout(function () { finish(false); }, 12000);
+        setTimeout(function () { finish(false); }, 10000);
       });
     });
   }
@@ -289,8 +310,16 @@
     });
   }
 
-  function useWatchPage() {
-    if (mode === 'watch') return;
+  function playAny(url) {
+    return play(url).then(function (ok) {
+      if (ok) return true;
+      lg('直リンク失敗 → プロキシ');
+      return play('/hls?u=' + encodeURIComponent(url));
+    });
+  }
+
+  function useWatchPage(force) {
+    if (mode === 'watch' && !force) return;
     mode = 'watch';
     layer.innerHTML = '';
     var old = player.querySelector('iframe');
@@ -304,10 +333,12 @@
     commentsFromServer();
   }
 
-  function useEmbed() {
-    if (mode === 'iframe' || mode === 'watch') return;
+  function useEmbed(force) {
+    if ((mode === 'iframe' || mode === 'watch') && !force) return;
     mode = 'iframe';
     layer.innerHTML = '';
+    var old = player.querySelector('iframe');
+    if (old) old.remove();
     if (vid.parentNode) vid.remove();
     var frame = el('iframe');
     frame.src = D.embed + '?jsapi=1&playerId=1&from=0';
@@ -323,51 +354,80 @@
           typeof d.data.currentTime === 'number') now = d.data.currentTime;
       if (d.eventName === 'error') { lg('embed: error'); useWatchPage(); }
     });
-    setTimeout(function () {
-      if (mode === 'iframe') useWatchPage();
-    }, 7000);
+    setTimeout(function () { if (mode === 'iframe') useWatchPage(); }, 6000);
+  }
+
+  function showDiag() {
+    lg('診断中…');
+    jget('/api/diag/' + encodeURIComponent(D.id), {}, 15000).then(function (j) {
+      Object.keys(j).forEach(function (k) {
+        lg(k + ': ' + JSON.stringify(j[k]).slice(0, 260));
+      });
+    }).catch(function (e) { lg('診断失敗: ' + e.message); });
   }
 
   var routes = [
-    ['server', function () { return jget('/api/brute/' + encodeURIComponent(D.id), {}); }],
-    ['proxy-guest', function () {
+    ['server', function () { return jget('/api/brute/' + encodeURIComponent(D.id), {}, 12000); }],
+    ['proxy', function () {
       return viaProxy('https://www.nicovideo.jp/api/watch/v3_guest/' + D.id +
         '?actionTrackId=' + track());
     }],
-    ['direct-guest', function () { return guest({}); }],
-    ['direct-nvapi', nvapi]
+    ['direct', function () { return guest({}); }],
+    ['nvapi', nvapi]
   ];
 
-  function boot() {
-    commentsFromServer();
-    var chain = Promise.resolve(false);
-    routes.forEach(function (route) {
-      chain = chain.then(function (finished) {
-        if (finished) return true;
-        var name = route[0];
-        return route[1]().then(function (meta) {
-          var urls = scan(meta, []);
-          return commentsFrom(meta).then(function () {
-            if (!urls.length) { lg(name + ': URLなし'); return false; }
-            lg(name + ': ' + urls[0].slice(0, 90));
-            return play(urls[0]).then(function (ok) {
-              if (ok) return true;
-              lg(name + ': 直リンク失敗 → プロキシ');
-              return play('/hls?u=' + encodeURIComponent(urls[0])).then(function (ok2) {
-                if (ok2) return true;
-                lg(name + ': プロキシも失敗');
-                return false;
-              });
-            });
-          });
+  function gather() {
+    return new Promise(function (resolve) {
+      var found = [], left = routes.length, done = false;
+      function finish() { if (!done) { done = true; resolve(found.slice()); } }
+      routes.forEach(function (r) {
+        r[1]().then(function (meta) {
+          commentsFrom(meta);
+          var u = scan(meta, []);
+          if (u.length) found.push(u[0]);
+          if (found.length) finish();
         }).catch(function (e) {
-          lg(name + ': ' + e.message);
-          return false;
+          lg(r[0] + ': ' + e.message);
+        }).then(function () {
+          left--;
+          if (!left) finish();
         });
       });
+      setTimeout(finish, 13000);
     });
-    chain.then(function (finished) {
-      if (!finished) { lg('全ルート失敗 → iframe'); useEmbed(); }
+  }
+
+  function start(reset) {
+    if (reset) {
+      comments = [];
+      idx = 0;
+      if (mode === 'watch' || mode === 'iframe') {
+        var f = player.querySelector('iframe');
+        if (f) f.remove();
+        if (!vid.parentNode) player.appendChild(vid);
+        mode = null;
+      }
+      commentsFromServer();
+    }
+    say('取得中…');
+    gather().then(function (urls) {
+      if (!urls.length) {
+        lg('URLが取れません → 埋め込みへ');
+        useEmbed(true);
+        return;
+      }
+      var i = 0;
+      function next() {
+        if (i >= urls.length) {
+          lg('全URL失敗 → 埋め込みへ');
+          useEmbed(true);
+          return;
+        }
+        var u = urls[i++];
+        lg('試行 ' + i + ': ' + u.slice(0, 80));
+        playAny(u).then(function (ok) { if (!ok) next(); });
+      }
+      next();
     });
   }
 
@@ -424,6 +484,6 @@
     if (!shown) layer.innerHTML = '';
   });
 
-  boot();
+  start(false);
   requestAnimationFrame(tick);
 })();
