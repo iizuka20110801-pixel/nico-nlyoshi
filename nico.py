@@ -2,6 +2,7 @@
 import asyncio
 import html as html_lib
 import json
+import os
 import re
 import time
 from datetime import timedelta, timezone
@@ -15,7 +16,9 @@ EMBED = "https://embed.nicovideo.jp/watch/{0}"
 NVAPI = "https://nvapi.nicovideo.jp/v1/watch/{0}"
 HLS = "https://nvapi.nicovideo.jp/v1/watch/{0}/access-rights/hls"
 GUEST = "https://www.nicovideo.jp/api/watch/v3_guest/{0}"
+KEYAPI = "https://nvapi.nicovideo.jp/v1/comment/keys/thread"
 NVCOMMENT = "https://public.nvcomment.nicovideo.jp"
+RELAY = os.environ.get("NICO_RELAY", "").strip()
 UA = "nico-viewer-plus/1.0 (personal project)"
 BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
@@ -55,6 +58,10 @@ _warm_at = 0.0
 _warm_lock = asyncio.Lock()
 
 
+def _via(url):
+    return RELAY + "?u=" + quote(url, safe="") if RELAY else url
+
+
 async def close():
     await _client.aclose()
     await _browser.aclose()
@@ -68,7 +75,7 @@ async def warmup():
         if time.time() - _warm_at < 1800:
             return
         try:
-            await _browser.get("https://www.nicovideo.jp/", timeout=8)
+            await _browser.get(_via("https://www.nicovideo.jp/"), timeout=8)
             _warm_at = time.time()
         except Exception:
             pass
@@ -206,7 +213,7 @@ async def guest_watch(video_id):
     async def run():
         await warmup()
         r = await _browser.get(
-            GUEST.format(video_id),
+            _via(GUEST.format(video_id)),
             params={"actionTrackId": "AAAAAAAAAA_" + str(int(time.time() * 1000)),
                     "t": str(int(time.time() * 1000))},
             headers={"X-Client-Os-Type": "others"})
@@ -224,7 +231,7 @@ async def nv_watch(video_id):
     async def run():
         await warmup()
         r = await _browser.get(
-            NVAPI.format(video_id),
+            _via(NVAPI.format(video_id)),
             params={"actionTrackId": "AAAAAAAAAA_" + str(int(time.time() * 1000))},
             headers={"X-Client-Os-Type": "others"})
         if r.status_code != 200:
@@ -239,7 +246,7 @@ async def nv_watch(video_id):
 
 async def watch_data(video_id):
     async def run():
-        r = await _browser.get(WATCH.format(video_id))
+        r = await _browser.get(_via(WATCH.format(video_id)))
         if r.status_code != 200:
             return None
         m = re.search(r'id="js-initial-watch-data"[^>]*data-api-data="([^"]*)"', r.text)
@@ -267,7 +274,7 @@ async def watch_data(video_id):
 async def html_probe(video_id):
     async def run():
         try:
-            r = await _browser.get(WATCH.format(video_id))
+            r = await _browser.get(_via(WATCH.format(video_id)))
         except Exception:
             return None
         text = r.text or ""
@@ -288,7 +295,7 @@ async def html_probe(video_id):
             outputs = [[quality[-1], audio[-1]]] if audio else [[quality[-1]]]
             try:
                 hr = await _browser.post(
-                    HLS.format(video_id), params={"actionTrackId": track},
+                    _via(HLS.format(video_id)), params={"actionTrackId": track},
                     json={"outputs": outputs},
                     headers={"Content-Type": "application/json",
                              "X-Access-Right-Key": key})
@@ -310,7 +317,7 @@ async def fetch_meta(video_id):
     got = await fetch_one(video_id)
     if got:
         return got
-    for source in (nv_watch, guest_watch, watch_data):
+    for source in (guest_watch, nv_watch, watch_data):
         api = await source(video_id)
         if not api or not api.get("video"):
             continue
@@ -324,24 +331,56 @@ def nvcomment_of(api):
     return (((api or {}).get("comment") or {}).get("nvComment") or {})
 
 
-async def fetch_comments(video_id):
-    nvc = {}
-    for source in (nv_watch, guest_watch, watch_data):
-        api = await source(video_id)
-        nvc = nvcomment_of(api)
-        if nvc.get("params") and nvc.get("threadKey"):
-            break
+def comment_pack(api, video_id):
+    c = (api or {}).get("comment") or {}
+    targets = []
+    for layer in c.get("layers") or []:
+        for t in layer.get("threadIds") or []:
+            if t.get("id"):
+                targets.append({"id": t["id"], "fork": t.get("fork") or 0})
+    if not targets:
+        return None
+    return {
+        "threadKey": c.get("threadKey") or "",
+        "params": {"targets": targets, "language": "ja-jp",
+                   "videoId": video_id,
+                   "userId": (c.get("keys") or {}).get("userKey") or ""},
+        "server": ((c.get("server") or {}).get("url") or NVCOMMENT).rstrip("/"),
+    }
 
-    params = nvc.get("params")
-    thread_key = nvc.get("threadKey")
-    if not params or not thread_key:
+
+async def thread_key(video_id, given):
+    if given:
+        return given
+    try:
+        r = await _browser.get(_via(KEYAPI), params={"videoId": video_id})
+        if r.status_code == 200:
+            return ((r.json() or {}).get("data") or {}).get("threadKey")
+    except Exception:
+        pass
+    return None
+
+
+async def fetch_comments(video_id):
+    pack = None
+    for source in (guest_watch, nv_watch):
+        pack = comment_pack(await source(video_id), video_id)
+        if pack:
+            break
+    if not pack:
+        pack = comment_pack(await watch_data(video_id), video_id)
+    if not pack:
         return []
-    server = (nvc.get("server") or NVCOMMENT).rstrip("/")
+
+    key = await thread_key(video_id, pack["threadKey"])
+    if not key:
+        return []
+    server = pack["server"]
 
     async def run():
         r = await _browser.post(
-            server + "/v1/threads?_frontendId=6",
-            json={"params": params, "threadKey": thread_key, "additionals": {}},
+            _via(server + "/v1/threads?_frontendId=6"),
+            json={"params": pack["params"], "threadKey": key, "additionals": {}},
             headers={"Content-Type": "application/json"})
         if r.status_code != 200:
             return []
@@ -361,24 +400,12 @@ async def fetch_comments(video_id):
 
 
 async def fetch_stream(video_id):
+    api = await guest_watch(video_id) or await nv_watch(video_id)
     urls = []
-    comments = {}
+    pack = comment_pack(api, video_id) if api else None
 
-    for source in (guest_watch, nv_watch):
-        api = await source(video_id)
-        if not api:
-            continue
-        nvc = nvcomment_of(api)
-        if nvc.get("params") and nvc.get("threadKey") and not comments:
-            comments = {"params": nvc["params"], "threadKey": nvc["threadKey"],
-                        "server": (nvc.get("server") or NVCOMMENT).rstrip("/")}
-        scan_m3u8(api, urls)
-        if urls:
-            break
-
-    if not urls:
-        api = await nv_watch(video_id)
-        domand = ((api or {}).get("media") or {}).get("domand") or {}
+    if api:
+        domand = ((api.get("media") or {}).get("domand")) or {}
         key = domand.get("accessRightKey")
         videos = sorted(domand.get("videos") or [], key=lambda v: v.get("height") or 0)
         audios = sorted(domand.get("audios") or [], key=lambda a: a.get("bitRate") or 0)
@@ -391,35 +418,31 @@ async def fetch_stream(video_id):
                      or "AAAAAAAAAA_" + str(int(time.time() * 1000)))
             try:
                 r = await _browser.post(
-                    HLS.format(video_id), params={"actionTrackId": track},
+                    _via(HLS.format(video_id)), params={"actionTrackId": track},
                     json={"outputs": outputs},
                     headers={"Content-Type": "application/json",
                              "X-Access-Right-Key": key})
                 if r.status_code in (200, 201):
-                    url = ((r.json() or {}).get("data") or {}).get("contentUrl")
-                    if url:
-                        urls.append(url)
+                    u = ((r.json() or {}).get("data") or {}).get("contentUrl")
+                    if u:
+                        urls.append(u)
             except Exception:
                 pass
+        scan_m3u8(api, urls)
 
     if not urls:
         probe = await html_probe(video_id)
         if probe and probe.get("url"):
             urls.append(probe["url"])
 
-    if not comments:
-        nvc = nvcomment_of(await watch_data(video_id))
-        if nvc.get("params") and nvc.get("threadKey"):
-            comments = {"params": nvc["params"], "threadKey": nvc["threadKey"],
-                        "server": (nvc.get("server") or NVCOMMENT).rstrip("/")}
-
-    return {"url": urls[0] if urls else None, "comments": comments or None}
+    return {"url": urls[0] if urls else None,
+            "comments": pack if pack and pack.get("threadKey") else None}
 
 
 async def diag(video_id):
-    out = {}
+    out = {"relay": RELAY or "(なし)"}
     try:
-        r = await _browser.get("https://www.nicovideo.jp/", timeout=8)
+        r = await _browser.get(_via("https://www.nicovideo.jp/"), timeout=8)
         out["warmup"] = [r.status_code, len(_browser.cookies)]
     except Exception as e:
         out["warmup"] = ["ERR", repr(e)[:140]]
@@ -431,8 +454,8 @@ async def diag(video_id):
         ("watch", WATCH.format(video_id), None),
     ):
         try:
-            r = await _browser.get(url, params=params)
-            out[name] = [r.status_code, r.text[:220].replace("\n", " ")]
+            r = await _browser.get(_via(url), params=params)
+            out[name] = [r.status_code, r.text[:200].replace("\n", " ")]
         except Exception as e:
             out[name] = ["ERR", repr(e)[:140]]
     return out
@@ -441,26 +464,24 @@ async def diag(video_id):
 async def raw_probe(video_id):
     await warmup()
     try:
-        r = await _browser.get(GUEST.format(video_id), params={
+        r = await _browser.get(_via(GUEST.format(video_id)), params={
             "actionTrackId": "AAAAAAAAAA_" + str(int(time.time() * 1000)),
             "t": str(int(time.time() * 1000))},
             headers={"X-Client-Os-Type": "others"})
     except Exception as e:
         return {"err": repr(e)[:200]}
-    out = {"status": r.status_code}
+    out = {"status": r.status_code, "relay": RELAY or "(なし)"}
     try:
         j = r.json()
     except Exception:
         out["text"] = r.text[:400]
         return out
     d = j.get("data") or {}
-    out["data_keys"] = list(d.keys())
-    media = d.get("media")
-    out["media"] = list(media.keys()) if isinstance(media, dict) else media
-    delivery = (media or {}).get("delivery") or {}
-    out["delivery"] = list(delivery.keys())
-    movie = delivery.get("movie") or {}
-    out["movie"] = list(movie.keys())
-    out["session"] = str(movie.get("session"))[:600]
-    out["comment"] = str(d.get("comment"))[:300]
+    out["okReason"] = d.get("okReason")
+    domand = ((d.get("media") or {}).get("domand")) or {}
+    out["domand"] = list(domand.keys()) if isinstance(domand, dict) else domand
+    out["videos"] = len(domand.get("videos") or [])
+    out["audios"] = len(domand.get("audios") or [])
+    out["key"] = (domand.get("accessRightKey") or "")[:20]
+    out["comment_keys"] = list((d.get("comment") or {}).keys())
     return out
