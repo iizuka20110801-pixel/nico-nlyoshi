@@ -45,7 +45,7 @@ NICO_HEADERS = {
 
 _client = httpx.AsyncClient(timeout=12.0, headers={"User-Agent": UA},
                             follow_redirects=True)
-_browser = httpx.AsyncClient(timeout=15.0, headers=NICO_HEADERS,
+_browser = httpx.AsyncClient(timeout=10.0, headers=NICO_HEADERS,
                              follow_redirects=True)
 
 _cache = {}
@@ -67,7 +67,7 @@ async def warmup():
         if time.time() - _warm_at < 1800:
             return
         try:
-            await _browser.get("https://www.nicovideo.jp/")
+            await _browser.get("https://www.nicovideo.jp/", timeout=8)
             _warm_at = time.time()
         except Exception:
             pass
@@ -265,6 +265,49 @@ async def watch_data(video_id):
         return None
 
 
+async def html_probe(video_id):
+    """視聴ページの生HTMLから m3u8 / accessRightKey / nvComment を強引に抜く"""
+    async def run():
+        try:
+            r = await _browser.get(WATCH.format(video_id))
+        except Exception:
+            return None
+        text = r.text or ""
+        urls = [u.replace("\\u0026", "&") for u in
+                re.findall(r'https://[^"\\\s<>]+?\.m3u8[^"\\\s<>]*', text)]
+        key = None
+        km = re.search(r'"accessRightKey"\s*:\s*"([^"]+)"', text)
+        if km:
+            key = km.group(1)
+        track = None
+        tm = re.search(r'"watchTrackId"\s*:\s*"([^"]+)"', text)
+        if tm:
+            track = tm.group(1)
+        quality = re.findall(r'"(video-[a-z0-9\-]+)"', text)
+        audio = re.findall(r'"(audio-[a-z0-9\-]+)"', text)
+
+        if not urls and key and track and quality:
+            outputs = [[quality[-1], audio[-1]]] if audio else [[quality[-1]]]
+            try:
+                hr = await _browser.post(
+                    HLS.format(video_id), params={"actionTrackId": track},
+                    json={"outputs": outputs},
+                    headers={"Content-Type": "application/json",
+                             "X-Access-Right-Key": key})
+                if hr.status_code in (200, 201):
+                    u = ((hr.json() or {}).get("data") or {}).get("contentUrl")
+                    if u:
+                        urls.append(u)
+            except Exception:
+                pass
+        return {"url": urls[0] if urls else None, "text": text}
+
+    try:
+        return await cached("h:" + video_id, 240, run)
+    except Exception:
+        return None
+
+
 async def fetch_meta(video_id):
     got = await fetch_one(video_id)
     if got:
@@ -361,6 +404,11 @@ async def fetch_stream(video_id):
             except Exception:
                 pass
 
+    if not urls:
+        probe = await html_probe(video_id)
+        if probe and probe.get("url"):
+            urls.append(probe["url"])
+
     if not comments:
         nvc = nvcomment_of(await watch_data(video_id))
         if nvc.get("params") and nvc.get("threadKey"):
@@ -373,7 +421,7 @@ async def fetch_stream(video_id):
 async def diag(video_id):
     out = {}
     try:
-        r = await _browser.get("https://www.nicovideo.jp/")
+        r = await _browser.get("https://www.nicovideo.jp/", timeout=8)
         out["warmup"] = [r.status_code, len(_browser.cookies)]
     except Exception as e:
         out["warmup"] = ["ERR", repr(e)[:140]]
