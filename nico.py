@@ -266,7 +266,6 @@ async def watch_data(video_id):
 
 
 async def html_probe(video_id):
-    """視聴ページの生HTMLから m3u8 / accessRightKey / nvComment を強引に抜く"""
     async def run():
         try:
             r = await _browser.get(WATCH.format(video_id))
@@ -437,4 +436,32 @@ async def diag(video_id):
             out[name] = [r.status_code, r.text[:220].replace("\n", " ")]
         except Exception as e:
             out[name] = ["ERR", repr(e)[:140]]
+    return out
+
+
+async def raw_probe(video_id):
+    await warmup()
+    try:
+        r = await _browser.get(GUEST.format(video_id), params={
+            "actionTrackId": "AAAAAAAAAA_" + str(int(time.time() * 1000)),
+            "t": str(int(time.time() * 1000))},
+            headers={"Accept": "application/json", "X-Client-Os-Type": "others"})
+    except Exception as e:
+        return {"err": repr(e)[:200]}
+    out = {"status": r.status_code}
+    try:
+        j = r.json()
+    except Exception:
+        out["text"] = r.text[:400]
+        return out
+    d = j.get("data") or {}
+    out["data_keys"] = list(d.keys())
+    media = d.get("media")
+    out["media"] = list(media.keys()) if isinstance(media, dict) else media
+    delivery = (media or {}).get("delivery") or {}
+    out["delivery"] = list(delivery.keys())
+    movie = delivery.get("movie") or {}
+    out["movie"] = list(movie.keys())
+    out["session"] = str(movie.get("session"))[:600]
+    out["comment"] = str(d.get("comment"))[:300]
     return out
