@@ -1,10 +1,12 @@
 (function () {
   var D = JSON.parse(document.getElementById('vd').textContent);
+  var RELAY = D.relay || '';
   var player = document.getElementById('player');
   var logbox = document.getElementById('log');
   var body = document.getElementById('body');
 
   function el(tag, cls) { var e = document.createElement(tag); if (cls) e.className = cls; return e; }
+  function via(url) { return RELAY ? RELAY + '?u=' + encodeURIComponent(url) : url; }
   function num(x) {
     x = +x || 0;
     if (x >= 1e8) return (x / 1e8).toFixed(1) + '億';
@@ -59,10 +61,9 @@
       Object.keys(modeBtns).forEach(function (k) {
         modeBtns[k].classList.toggle('on', k === m[0]);
       });
-      if (m[0] === 'hls') start(true);
+      if (m[0] === 'hls' || m[0] === 'auto') start(true);
       if (m[0] === 'embed') useEmbed(true);
       if (m[0] === 'watch') useWatchPage(true);
-      if (m[0] === 'auto') start(true);
       if (m[0] === 'diag') showDiag();
     };
     modeBtns[m[0]] = b;
@@ -111,7 +112,6 @@
   }
 
   var comments = [], shown = true, mode = null, now = 0, hlsLoaded = false, got = -1;
-  var started = false;
 
   function lg(t) { logbox.textContent += t + '\n'; logbox.scrollTop = 1e9; }
   function say(t, bad) { state.textContent = t; state.className = 'note' + (bad ? ' bad' : ''); }
@@ -148,19 +148,15 @@
     }, function (e) { clearTimeout(t); throw e; });
   }
 
-  function viaProxy(url) {
-    return jget('https://api.allorigins.win/raw?url=' + encodeURIComponent(url), {}, 10000);
-  }
-
   function guest(headers) {
-    return jget('https://www.nicovideo.jp/api/watch/v3_guest/' + D.id +
-      '?actionTrackId=' + track() + '&t=' + Date.now(), headers);
+    return jget(via('https://www.nicovideo.jp/api/watch/v3_guest/' + D.id +
+      '?actionTrackId=' + track() + '&t=' + Date.now()), headers);
   }
 
   function nvapi() {
     var trackId = track();
-    return jget('https://nvapi.nicovideo.jp/v1/watch/' + D.id +
-      '?actionTrackId=' + trackId, H).then(function (meta) {
+    return jget(via('https://nvapi.nicovideo.jp/v1/watch/' + D.id +
+      '?actionTrackId=' + trackId), H).then(function (meta) {
       var data = meta.data || {};
       var domand = (data.media || {}).domand || {};
       var key = domand.accessRightKey;
@@ -176,8 +172,8 @@
       var v = pool[pool.length - 1];
       var a = audios[audios.length - 1];
       var outputs = a ? [[v.id, a.id]] : [[v.id]];
-      return fetch('https://nvapi.nicovideo.jp/v1/watch/' + D.id +
-        '/access-rights/hls?actionTrackId=' + ((data.client || {}).watchTrackId || trackId), {
+      return fetch(via('https://nvapi.nicovideo.jp/v1/watch/' + D.id +
+        '/access-rights/hls?actionTrackId=' + ((data.client || {}).watchTrackId || trackId)), {
         method: 'POST',
         headers: Object.assign({ 'Content-Type': 'application/json', 'X-Access-Right-Key': key }, H),
         body: JSON.stringify({ outputs: outputs })
@@ -210,13 +206,34 @@
   }
 
   function commentsFrom(meta) {
-    var nv = (((meta || {}).data || {}).comment || {}).nvComment;
-    if (!nv || !nv.params || !nv.threadKey) return Promise.resolve(false);
-    var base = (nv.server || 'https://public.nvcomment.nicovideo.jp').replace(/\/$/, '');
-    return fetch(base + '/v1/threads?_frontendId=6', {
+    var c = (((meta || {}).data || {}).comment) || {};
+    var nv = c.nvComment;
+    var params = null, threadKey = null, server = 'https://public.nvcomment.nicovideo.jp';
+    if (nv && nv.params && nv.threadKey) {
+      params = nv.params; threadKey = nv.threadKey;
+      if (nv.server) server = nv.server;
+    } else if (c.layers) {
+      var targets = [];
+      c.layers.forEach(function (l) {
+        (l.threadIds || []).forEach(function (t) {
+          if (t.id) targets.push({ id: t.id, fork: t.fork || 0 });
+        });
+      });
+      if (!targets.length) return Promise.resolve(false);
+      params = { targets: targets, language: 'ja-jp', videoId: D.id,
+                 userId: (c.keys || {}).userKey || '' };
+      threadKey = c.threadKey;
+      if (c.server && c.server.url) server = c.server.url;
+    } else {
+      return Promise.resolve(false);
+    }
+    if (!threadKey) return Promise.resolve(false);
+    server = server.replace(/\/$/, '');
+
+    return fetch(via(server + '/v1/threads?_frontendId=6'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Frontend-Id': '6', 'X-Frontend-Version': '0' },
-      body: JSON.stringify({ params: nv.params, threadKey: nv.threadKey, additionals: {} })
+      body: JSON.stringify({ params: params, threadKey: threadKey, additionals: {} })
     }).then(function (r) {
       if (!r.ok) throw new Error('HTTP ' + r.status);
       return r.json();
@@ -361,17 +378,13 @@
     lg('診断中…');
     jget('/api/diag/' + encodeURIComponent(D.id), {}, 15000).then(function (j) {
       Object.keys(j).forEach(function (k) {
-        lg(k + ': ' + JSON.stringify(j[k]).slice(0, 260));
+        lg(k + ': ' + JSON.stringify(j[k]).slice(0, 240));
       });
     }).catch(function (e) { lg('診断失敗: ' + e.message); });
   }
 
   var routes = [
     ['server', function () { return jget('/api/brute/' + encodeURIComponent(D.id), {}, 12000); }],
-    ['proxy', function () {
-      return viaProxy('https://www.nicovideo.jp/api/watch/v3_guest/' + D.id +
-        '?actionTrackId=' + track());
-    }],
     ['direct', function () { return guest({}); }],
     ['nvapi', nvapi]
   ];
@@ -396,6 +409,8 @@
       setTimeout(finish, 13000);
     });
   }
+
+  var idx = 0;
 
   function start(reset) {
     if (reset) {
@@ -464,7 +479,6 @@
     anim.onfinish = function () { d.remove(); };
   }
 
-  var idx = 0;
   function tick() {
     var t = mode === 'video' ? vid.currentTime : now;
     if (shown && comments.length && t > 0) {
