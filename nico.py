@@ -19,6 +19,9 @@ GUEST = "https://www.nicovideo.jp/api/watch/v3_guest/{0}"
 KEYAPI = "https://nvapi.nicovideo.jp/v1/comment/keys/thread"
 NVCOMMENT = "https://public.nvcomment.nicovideo.jp"
 RELAY = os.environ.get("NICO_RELAY", "").strip()
+if RELAY.endswith("?u="):
+    RELAY = RELAY[:-3]
+RELAY = RELAY.rstrip("/")
 UA = "nico-viewer-plus/1.0 (personal project)"
 BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
@@ -59,7 +62,9 @@ _warm_lock = asyncio.Lock()
 
 
 def _via(url):
-    return RELAY + "?u=" + quote(url, safe="") if RELAY else url
+    if not RELAY:
+        return url
+    return RELAY + "/?u=" + quote(url, safe="")
 
 
 async def close():
