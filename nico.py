@@ -18,6 +18,7 @@ HLS = "https://nvapi.nicovideo.jp/v1/watch/{0}/access-rights/hls"
 GUEST = "https://www.nicovideo.jp/api/watch/v3_guest/{0}"
 KEYAPI = "https://nvapi.nicovideo.jp/v1/comment/keys/thread"
 NVCOMMENT = "https://public.nvcomment.nicovideo.jp"
+HLSJS = "https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js"
 RELAY = os.environ.get("NICO_RELAY", "").strip()
 if RELAY.endswith("?u="):
     RELAY = RELAY[:-3]
@@ -159,6 +160,33 @@ def scan_m3u8(node, out):
         for x in node.values():
             scan_m3u8(x, out)
     return out
+
+
+async def get_text(url):
+    r = await _browser.get(_via(url))
+    if r.status_code != 200:
+        raise RuntimeError("text " + str(r.status_code))
+    return r.text
+
+
+async def get_bytes(url):
+    r = await _browser.get(_via(url))
+    if r.status_code != 200:
+        raise RuntimeError("bytes " + str(r.status_code))
+    return r.content
+
+
+async def hlsjs() -> bytes:
+    async def run():
+        r = await _client.get(HLSJS)
+        if r.status_code != 200:
+            return b""
+        return r.content
+
+    try:
+        return await cached("hlsjs", 86400, run)
+    except Exception:
+        return b""
 
 
 async def search(keyword, sort="view", genre="", page=1,
