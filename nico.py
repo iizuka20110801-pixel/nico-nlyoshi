@@ -440,12 +440,13 @@ async def fetch_stream(video_id):
     if api:
         domand = ((api.get("media") or {}).get("domand")) or {}
         key = domand.get("accessRightKey")
-        videos = sorted(domand.get("videos") or [], key=lambda v: v.get("height") or 0)
-        audios = sorted(domand.get("audios") or [], key=lambda a: a.get("bitRate") or 0)
+        videos = [v for v in (domand.get("videos") or []) if v.get("isAvailable") is not False]
+        audios = [a for a in (domand.get("audios") or []) if a.get("isAvailable") is not False]
+        videos.sort(key=lambda v: v.get("height") or 0)
+        audios.sort(key=lambda a: a.get("bitRate") or 0)
         if key and videos:
-            under = [v for v in videos if (v.get("height") or 0) <= 720]
-            video = (under or videos)[-1]
-            audio = audios[-1] if audios else None
+            video = videos[0]
+            audio = audios[0] if audios else None
             outputs = [[video["id"], audio["id"]]] if audio else [[video["id"]]]
             track = ((api.get("client") or {}).get("watchTrackId")
                      or "AAAAAAAAAA_" + str(int(time.time() * 1000)))
@@ -511,11 +512,11 @@ async def raw_probe(video_id):
         out["text"] = r.text[:400]
         return out
     d = j.get("data") or {}
-    out["okReason"] = d.get("okReason")
     domand = ((d.get("media") or {}).get("domand")) or {}
-    out["domand"] = list(domand.keys()) if isinstance(domand, dict) else domand
-    out["videos"] = len(domand.get("videos") or [])
-    out["audios"] = len(domand.get("audios") or [])
+    out["videos"] = [(v.get("id"), v.get("height"), v.get("isAvailable"))
+                     for v in (domand.get("videos") or [])]
+    out["audios"] = [(a.get("id"), a.get("bitRate"), a.get("isAvailable"))
+                     for a in (domand.get("audios") or [])]
     out["key"] = (domand.get("accessRightKey") or "")[:20]
-    out["comment_keys"] = list((d.get("comment") or {}).keys())
+    out["track"] = ((d.get("client") or {}).get("watchTrackId") or "")[:30]
     return out
