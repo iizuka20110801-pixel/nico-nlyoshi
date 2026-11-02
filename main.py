@@ -1,4 +1,5 @@
 """nico-viewer-plus — ニコニコ動画ビューア"""
+import asyncio
 import html as html_lib
 import json
 import re
