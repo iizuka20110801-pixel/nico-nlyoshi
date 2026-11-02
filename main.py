@@ -9,7 +9,8 @@ from pathlib import Path
 from urllib.parse import quote, unquote, urljoin
 
 from fastapi import FastAPI, Query, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
+                               RedirectResponse, Response)
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -21,6 +22,9 @@ SORT_LABELS = {"view": "再生数順", "new": "新着順",
 TERM_LABELS = {"24h": "24時間", "week": "週間", "month": "月間"}
 
 SHELL = Path("static/watch_shell.html").read_text(encoding="utf-8")
+MP4_DIR = Path("/tmp/mp4")
+MP4_DIR.mkdir(parents=True, exist_ok=True)
+_mp4_locks: dict[str, object] = {}
 
 
 @asynccontextmanager
@@ -192,12 +196,20 @@ async def api_raw(video_id: str):
     return JSONResponse(await nico.raw_probe(cid))
 
 
+@app.get("/hlsjs")
+async def hlsjs():
+    body = await nico.hlsjs()
+    return Response(content=body, media_type="application/javascript",
+                    headers={"Cache-Control": "public, max-age=86400"})
+
+
 @app.get("/hls")
 async def hls_proxy(u: str = Query(..., max_length=2000)):
     if not u.startswith("http"):
         return Response(status_code=404)
     try:
-        r = await nico._browser.get(u, headers={"Referer": "https://www.nicovideo.jp/"})
+        r = await nico._browser.get(nico._via(u),
+                                    headers={"Referer": "https://www.nicovideo.jp/"})
     except Exception:
         return Response(status_code=502)
     if r.status_code != 200:
@@ -223,6 +235,52 @@ async def hls_proxy(u: str = Query(..., max_length=2000)):
 
     return Response(content=r.content, media_type=ctype or "video/mp2t",
                     headers={"Cache-Control": "public, max-age=3600"})
+
+
+@app.get("/mp4/{video_id}")
+async def mp4(video_id: str):
+    cid = re.sub(r"[^A-Za-z0-9_]", "", video_id)
+    path = MP4_DIR / (cid + ".mp4")
+    if path.exists() and path.stat().st_size > 0:
+        return FileResponse(path, media_type="video/mp4")
+
+    lock = _mp4_locks.setdefault(cid, asyncio.Lock())
+    async with lock:
+        if not (path.exists() and path.stat().st_size > 0):
+            info = await nico.fetch_stream(cid)
+            url = info.get("url")
+            if not url:
+                return JSONResponse({"error": "no url"}, status_code=404)
+            try:
+                text = await nico.get_text(url)
+            except Exception:
+                return JSONResponse({"error": "playlist"}, status_code=502)
+            if "#EXT-X-STREAM-INF" in text:
+                for line in text.splitlines():
+                    if line and not line.startswith("#"):
+                        url = urljoin(url, line)
+                        text = await nico.get_text(url)
+                        break
+            init = None
+            m = re.search(r'#EXT-X-MAP:URI="([^"]+)"', text)
+            if m:
+                init = urljoin(url, m.group(1))
+            segs = [urljoin(url, ln) for ln in text.splitlines()
+                    if ln and not ln.startswith("#")]
+            if not segs:
+                return JSONResponse({"error": "no segments"}, status_code=502)
+            tmp = MP4_DIR / (cid + ".part")
+            with open(tmp, "wb") as f:
+                if init:
+                    f.write(await nico.get_bytes(init))
+                for s in segs:
+                    try:
+                        f.write(await nico.get_bytes(s))
+                    except Exception:
+                        pass
+            tmp.replace(path)
+
+    return FileResponse(path, media_type="video/mp4")
 
 
 @app.get("/history", response_class=HTMLResponse)
