@@ -51,8 +51,8 @@
 
   var modes = el('div', 'dmbox');
   var MODES = [
-    ['auto', '自動'], ['relay', '強制取得'], ['embed', '埋め込み'],
-    ['watch', '視聴ページ'], ['diag', '診断']
+    ['auto', '自動'], ['mp4', 'MP4'], ['relay', '強制取得'],
+    ['embed', '埋め込み'], ['watch', '視聴ページ'], ['diag', '診断']
   ];
   var modeBtns = {};
   MODES.forEach(function (m) {
@@ -63,6 +63,7 @@
         modeBtns[k].classList.toggle('on', k === m[0]);
       });
       if (m[0] === 'auto') start(true);
+      if (m[0] === 'mp4') useMp4(true);
       if (m[0] === 'relay') startRelay(true);
       if (m[0] === 'embed') useEmbed(true);
       if (m[0] === 'watch') useWatchPage(true);
@@ -273,7 +274,7 @@
     if (hlsLoaded || window.Hls) { hlsLoaded = true; return Promise.resolve(); }
     return new Promise(function (res) {
       var s = document.createElement('script');
-      s.src = 'https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js';
+      s.src = '/hlsjs';
       s.onload = function () { hlsLoaded = true; res(); };
       s.onerror = function () { hlsLoaded = true; res(); };
       document.head.appendChild(s);
@@ -336,22 +337,37 @@
   }
 
   function playAny(url) {
-    if (RELAY) {
-      lg('リレー再生を試行');
-      return play(wrap(url)).then(function (ok) {
-        if (ok) return true;
-        lg('リレー再生失敗 → 直リンク');
-        return play(url).then(function (ok2) {
-          if (ok2) return true;
-          return play('/hls?u=' + encodeURIComponent(url));
-        });
-      });
-    }
-    return play(url).then(function (ok) {
+    lg('自前プロキシで試行');
+    return play('/hls?u=' + encodeURIComponent(url)).then(function (ok) {
       if (ok) return true;
-      lg('直リンク失敗 → プロキシ');
-      return play('/hls?u=' + encodeURIComponent(url));
+      lg('プロキシ失敗 → リレー直');
+      return play(wrap(url)).then(function (ok2) {
+        if (ok2) return true;
+        lg('リレー失敗 → 直リンク');
+        return play(url);
+      });
     });
+  }
+
+  function useMp4(force) {
+    if (mode === 'mp4' && !force) return;
+    mode = 'mp4';
+    layer.innerHTML = '';
+    var f = player.querySelector('iframe');
+    if (f) f.remove();
+    if (!vid.parentNode) player.appendChild(vid);
+    say('MP4を準備中…（初回は時間がかかります）');
+    var probe = new XMLHttpRequest();
+    probe.open('HEAD', '/mp4/' + encodeURIComponent(D.id));
+    probe.onload = function () {
+      if (probe.status >= 400) { say('MP4化に失敗しました', true); return; }
+      vid.src = '/mp4/' + encodeURIComponent(D.id);
+      say('MP4で再生中');
+      vid.play().catch(function () {});
+    };
+    probe.onerror = function () { say('MP4化に失敗しました', true); };
+    probe.send();
+    commentsFromServer();
   }
 
   function useWatchPage(force) {
@@ -430,119 +446,4 @@
 
   function startRelay(reset) {
     if (!RELAY) { lg('リレー未設定'); return Promise.resolve(false); }
-    if (reset) { resetPlayer(); commentsFromServer(); }
-    say('強制取得中…');
-    return jget(RELAY + '/v/' + encodeURIComponent(D.id), {}, 20000).then(function (j) {
-      if (j.comments && j.comments.length) setComments(j.comments);
-      if (!j.url) { lg('relay: ' + (j.error || 'URLなし')); return false; }
-      return tryList([j.url]);
-    }).catch(function (e) {
-      lg('relay: ' + e.message);
-      return false;
-    });
-  }
-
-  function gather() {
-    var routes = [
-      ['relay', function () {
-        return jget(RELAY + '/v/' + encodeURIComponent(D.id), {}, 20000).then(function (j) {
-          if (j.comments && j.comments.length) setComments(j.comments);
-          if (!j.url) throw new Error(j.error || 'URLなし');
-          return { url: j.url };
-        });
-      }],
-      ['server', function () { return jget('/api/brute/' + encodeURIComponent(D.id), {}, 12000); }],
-      ['direct', function () { return guest({}); }],
-      ['nvapi', nvapi]
-    ];
-    if (!RELAY) routes.shift();
-
-    return new Promise(function (resolve) {
-      var found = [], left = routes.length, done = false;
-      function finish() { if (!done) { done = true; resolve(found.slice()); } }
-      routes.forEach(function (r) {
-        r[1]().then(function (meta) {
-          commentsFrom(meta);
-          var u = scan(meta, []);
-          if (u.length) found.push(u[0]);
-          if (found.length) finish();
-        }).catch(function (e) {
-          lg(r[0] + ': ' + e.message);
-        }).then(function () {
-          left--;
-          if (!left) finish();
-        });
-      });
-      setTimeout(finish, 14000);
-    });
-  }
-
-  function start(reset) {
-    if (reset) { resetPlayer(); commentsFromServer(); }
-    say('取得中…');
-    gather().then(tryList).then(function (ok) {
-      if (ok) return;
-      lg('全ルート失敗 → 強制取得を再試行');
-      return startRelay(false).then(function (ok2) {
-        if (ok2) return;
-        lg('それでも失敗 → 埋め込み');
-        useEmbed(true);
-      });
-    });
-  }
-
-  var lanes = [];
-  var LANE_H = 26;
-
-  function spawn(c) {
-    var big = c.cmd.indexOf('big') >= 0;
-    var small = c.cmd.indexOf('small') >= 0;
-    var d = el('div', 'dm');
-    d.textContent = c.body;
-    d.style.fontSize = big ? '26px' : (small ? '13px' : '19px');
-    var col = c.cmd.filter(function (x) { return /^#[0-9a-f]{6}$/i.test(x); })[0];
-    if (col) d.style.color = col;
-    var h = layer.clientHeight || 1;
-    var total = Math.max(1, Math.floor(h / LANE_H));
-    var lane = -1;
-    for (var i = 0; i < total; i++) {
-      if (!lanes[i] || lanes[i] < performance.now()) { lane = i; break; }
-    }
-    if (lane < 0) return;
-    var top = lane * LANE_H;
-    if (c.cmd.indexOf('shita') >= 0) top = h - (lane + 1) * LANE_H;
-    d.style.top = Math.max(0, top) + 'px';
-    d.style.left = '100%';
-    layer.appendChild(d);
-    var w = d.offsetWidth || 200;
-    var dist = layer.clientWidth + w + 20;
-    var dur = Math.max(4000, dist * 11);
-    lanes[lane] = performance.now() + 1400;
-    var anim = d.animate(
-      [{ transform: 'translateX(0)' }, { transform: 'translateX(-' + dist + 'px)' }],
-      { duration: dur, easing: 'linear' });
-    anim.onfinish = function () { d.remove(); };
-  }
-
-  function tick() {
-    var t = mode === 'video' ? vid.currentTime : now;
-    if (shown && comments.length && t > 0) {
-      if (idx > comments.length) idx = 0;
-      while (idx < comments.length && comments[idx].v <= t) {
-        if (comments[idx].v > t - 1.5) spawn(comments[idx]);
-        idx++;
-      }
-    }
-    requestAnimationFrame(tick);
-  }
-
-  toggle.addEventListener('click', function () {
-    shown = !shown;
-    toggle.classList.toggle('on', shown);
-    toggle.textContent = shown ? 'コメント ON' : 'コメント OFF';
-    if (!shown) layer.innerHTML = '';
-  });
-
-  start(false);
-  requestAnimationFrame(tick);
-})();
+    if
