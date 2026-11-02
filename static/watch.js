@@ -145,13 +145,13 @@
         var data = meta.data || {};
         var domand = (data.media || {}).domand || {};
         var key = domand.accessRightKey;
-        var videos = (domand.videos || []).slice().sort(function (a, b) { return (a.height || 0) - (b.height || 0); });
-        var audios = (domand.audios || []).slice().sort(function (a, b) { return (a.bitRate || 0) - (b.bitRate || 0); });
+        var videos = (domand.videos || []).filter(function (v) { return v.isAvailable !== false; })
+          .sort(function (a, b) { return (a.height || 0) - (b.height || 0); });
+        var audios = (domand.audios || []).filter(function (a) { return a.isAvailable !== false; })
+          .sort(function (a, b) { return (a.bitRate || 0) - (b.bitRate || 0); });
         if (!key || !videos.length) throw new Error('no access-right');
-        var under = videos.filter(function (v) { return (v.height || 0) <= 720; });
-        var pool = under.length ? under : videos;
-        var v = pool[pool.length - 1];
-        var a = audios[audios.length - 1];
+        var v = videos[0];
+        var a = audios[0];
         var outputs = a ? [[v.id, a.id]] : [[v.id]];
         return fetch(via('https://nvapi.nicovideo.jp/v1/watch/' + D.id +
           '/access-rights/hls?actionTrackId=' + ((data.client || {}).watchTrackId || tid)), {
