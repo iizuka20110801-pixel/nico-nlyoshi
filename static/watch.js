@@ -6,7 +6,8 @@
   var body = document.getElementById('body');
 
   function el(tag, cls) { var e = document.createElement(tag); if (cls) e.className = cls; return e; }
-  function via(url) { return RELAY ? RELAY + '/p/' + encodeURIComponent(url) : url; }
+  function wrap(url) { return RELAY ? RELAY + '/p/' + encodeURIComponent(url) : url; }
+  function via(url) { return wrap(url); }
   function num(x) {
     x = +x || 0;
     if (x >= 1e8) return (x / 1e8).toFixed(1) + '億';
@@ -335,6 +336,17 @@
   }
 
   function playAny(url) {
+    if (RELAY) {
+      lg('リレー再生を試行');
+      return play(wrap(url)).then(function (ok) {
+        if (ok) return true;
+        lg('リレー再生失敗 → 直リンク');
+        return play(url).then(function (ok2) {
+          if (ok2) return true;
+          return play('/hls?u=' + encodeURIComponent(url));
+        });
+      });
+    }
     return play(url).then(function (ok) {
       if (ok) return true;
       lg('直リンク失敗 → プロキシ');
