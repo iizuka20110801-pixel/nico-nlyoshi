@@ -64,7 +64,7 @@ _warm_lock = asyncio.Lock()
 def _via(url):
     if not RELAY:
         return url
-    return RELAY + "/?u=" + quote(url, safe="")
+    return RELAY + "/p/" + quote(url, safe="")
 
 
 async def close():
@@ -463,6 +463,7 @@ async def diag(video_id):
             out[name] = [r.status_code, r.text[:200].replace("\n", " ")]
         except Exception as e:
             out[name] = ["ERR", repr(e)[:140]]
+    out["built"] = _via(GUEST.format(video_id))
     return out
 
 
