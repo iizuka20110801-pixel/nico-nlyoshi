@@ -6,7 +6,7 @@
   var body = document.getElementById('body');
 
   function el(tag, cls) { var e = document.createElement(tag); if (cls) e.className = cls; return e; }
-  function via(url) { return RELAY ? RELAY + '?u=' + encodeURIComponent(url) : url; }
+  function via(url) { return RELAY ? RELAY + '/p/' + encodeURIComponent(url) : url; }
   function num(x) {
     x = +x || 0;
     if (x >= 1e8) return (x / 1e8).toFixed(1) + '億';
@@ -50,7 +50,7 @@
 
   var modes = el('div', 'dmbox');
   var MODES = [
-    ['auto', '自動'], ['hls', 'HLS'], ['embed', '埋め込み'],
+    ['auto', '自動'], ['relay', '強制取得'], ['embed', '埋め込み'],
     ['watch', '視聴ページ'], ['diag', '診断']
   ];
   var modeBtns = {};
@@ -61,7 +61,8 @@
       Object.keys(modeBtns).forEach(function (k) {
         modeBtns[k].classList.toggle('on', k === m[0]);
       });
-      if (m[0] === 'hls' || m[0] === 'auto') start(true);
+      if (m[0] === 'auto') start(true);
+      if (m[0] === 'relay') startRelay(true);
       if (m[0] === 'embed') useEmbed(true);
       if (m[0] === 'watch') useWatchPage(true);
       if (m[0] === 'diag') showDiag();
@@ -112,6 +113,7 @@
   }
 
   var comments = [], shown = true, mode = null, now = 0, hlsLoaded = false, got = -1;
+  var idx = 0;
 
   function lg(t) { logbox.textContent += t + '\n'; logbox.scrollTop = 1e9; }
   function say(t, bad) { state.textContent = t; state.className = 'note' + (bad ? ' bad' : ''); }
@@ -137,7 +139,7 @@
 
   function jget(url, headers, ms) {
     var ac = window.AbortController ? new AbortController() : null;
-    var t = setTimeout(function () { if (ac) ac.abort(); }, ms || 8000);
+    var t = setTimeout(function () { if (ac) ac.abort(); }, ms || 9000);
     return fetch(url, {
       headers: headers || {}, credentials: 'omit',
       signal: ac ? ac.signal : undefined
@@ -202,10 +204,15 @@
   function setComments(list) {
     comments = list;
     got = 0;
+    idx = 0;
     say(list.length ? list.length + '件のコメント' : 'コメントなし');
   }
 
   function commentsFrom(meta) {
+    if (meta && meta.comments && meta.comments.length) {
+      setComments(meta.comments);
+      return Promise.resolve(true);
+    }
     var c = (((meta || {}).data || {}).comment) || {};
     var nv = c.nvComment;
     var params = null, threadKey = null, server = 'https://public.nvcomment.nicovideo.jp';
@@ -383,13 +390,61 @@
     }).catch(function (e) { lg('診断失敗: ' + e.message); });
   }
 
-  var routes = [
-    ['server', function () { return jget('/api/brute/' + encodeURIComponent(D.id), {}, 12000); }],
-    ['direct', function () { return guest({}); }],
-    ['nvapi', nvapi]
-  ];
+  function resetPlayer() {
+    comments = [];
+    idx = 0;
+    if (mode === 'watch' || mode === 'iframe') {
+      var f = player.querySelector('iframe');
+      if (f) f.remove();
+      if (!vid.parentNode) player.appendChild(vid);
+      mode = null;
+    }
+  }
+
+  function tryList(urls) {
+    if (!urls.length) {
+      lg('URLが取れません');
+      return Promise.resolve(false);
+    }
+    var i = 0;
+    function next() {
+      if (i >= urls.length) return Promise.resolve(false);
+      var u = urls[i++];
+      lg('試行 ' + i + ': ' + u.slice(0, 80));
+      return playAny(u).then(function (ok) { return ok ? true : next(); });
+    }
+    return next();
+  }
+
+  function startRelay(reset) {
+    if (!RELAY) { lg('リレー未設定'); return Promise.resolve(false); }
+    if (reset) { resetPlayer(); commentsFromServer(); }
+    say('強制取得中…');
+    return jget(RELAY + '/v/' + encodeURIComponent(D.id), {}, 20000).then(function (j) {
+      if (j.comments && j.comments.length) setComments(j.comments);
+      if (!j.url) { lg('relay: ' + (j.error || 'URLなし')); return false; }
+      return tryList([j.url]);
+    }).catch(function (e) {
+      lg('relay: ' + e.message);
+      return false;
+    });
+  }
 
   function gather() {
+    var routes = [
+      ['relay', function () {
+        return jget(RELAY + '/v/' + encodeURIComponent(D.id), {}, 20000).then(function (j) {
+          if (j.comments && j.comments.length) setComments(j.comments);
+          if (!j.url) throw new Error(j.error || 'URLなし');
+          return { url: j.url };
+        });
+      }],
+      ['server', function () { return jget('/api/brute/' + encodeURIComponent(D.id), {}, 12000); }],
+      ['direct', function () { return guest({}); }],
+      ['nvapi', nvapi]
+    ];
+    if (!RELAY) routes.shift();
+
     return new Promise(function (resolve) {
       var found = [], left = routes.length, done = false;
       function finish() { if (!done) { done = true; resolve(found.slice()); } }
@@ -406,43 +461,21 @@
           if (!left) finish();
         });
       });
-      setTimeout(finish, 13000);
+      setTimeout(finish, 14000);
     });
   }
 
-  var idx = 0;
-
   function start(reset) {
-    if (reset) {
-      comments = [];
-      idx = 0;
-      if (mode === 'watch' || mode === 'iframe') {
-        var f = player.querySelector('iframe');
-        if (f) f.remove();
-        if (!vid.parentNode) player.appendChild(vid);
-        mode = null;
-      }
-      commentsFromServer();
-    }
+    if (reset) { resetPlayer(); commentsFromServer(); }
     say('取得中…');
-    gather().then(function (urls) {
-      if (!urls.length) {
-        lg('URLが取れません → 埋め込みへ');
+    gather().then(tryList).then(function (ok) {
+      if (ok) return;
+      lg('全ルート失敗 → 強制取得を再試行');
+      return startRelay(false).then(function (ok2) {
+        if (ok2) return;
+        lg('それでも失敗 → 埋め込み');
         useEmbed(true);
-        return;
-      }
-      var i = 0;
-      function next() {
-        if (i >= urls.length) {
-          lg('全URL失敗 → 埋め込みへ');
-          useEmbed(true);
-          return;
-        }
-        var u = urls[i++];
-        lg('試行 ' + i + ': ' + u.slice(0, 80));
-        playAny(u).then(function (ok) { if (!ok) next(); });
-      }
-      next();
+      });
     });
   }
 
