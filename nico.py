@@ -100,6 +100,53 @@ async def cached(key, ttl, factory):
         return value
 
 
+async def diag(video_id):
+    out = {"relay": RELAY or "(なし)"}
+    try:
+        r = await _browser.get(_via("https://www.nicovideo.jp/"), timeout=8)
+        out["warmup"] = [r.status_code, len(_browser.cookies)]
+    except Exception as e:
+        out["warmup"] = ["ERR", repr(e)[:140]]
+    track = "AAAAAAAAAA_" + str(int(time.time() * 1000))
+    for name, url, params in (
+        ("guest", GUEST.format(video_id), {"actionTrackId": track}),
+        ("nvapi", NVAPI.format(video_id), {"actionTrackId": track}),
+        ("watch", WATCH.format(video_id), None),
+    ):
+        try:
+            r = await _browser.get(_via(url), params=params)
+            out[name] = [r.status_code, r.text[:200].replace("\n", " ")]
+        except Exception as e:
+            out[name] = ["ERR", repr(e)[:140]]
+    out["built"] = _via(GUEST.format(video_id))
+    return out
+
+
+async def raw_probe(video_id):
+    await warmup()
+    try:
+        r = await _browser.get(_via(GUEST.format(video_id)), params={
+            "actionTrackId": "AAAAAAAAAA_" + str(int(time.time() * 1000)),
+            "t": str(int(time.time() * 1000))},
+            headers={"X-Client-Os-Type": "others"})
+    except Exception as e:
+        return {"err": repr(e)[:200]}
+    out = {"status": r.status_code, "relay": RELAY or "(なし)"}
+    try:
+        j = r.json()
+    except Exception:
+        out["text"] = r.text[:400]
+        return out
+    d = j.get("data") or {}
+    domand = ((d.get("media") or {}).get("domand")) or {}
+    out["videos"] = [(v.get("id"), v.get("height"), v.get("isAvailable"))
+                     for v in (domand.get("videos") or [])]
+    out["audios"] = [(a.get("id"), a.get("bitRate"), a.get("isAvailable"))
+                     for a in (domand.get("audios") or [])]
+    out["key"] = (domand.get("accessRightKey") or "")[:20]
+    return out
+
+
 def norm(item):
     cid = item.get("contentId") or ""
     return {
@@ -327,10 +374,6 @@ async def fetch_meta(video_id):
                 if t.get("name")]
         return build_from_nv(video_id, api["video"], tags)
     return None
-
-
-def nvcomment_of(api):
-    return (((api or {}).get("comment") or {}).get("nvComment") or {})
 
 
 def comment_pack(api, video_id):
