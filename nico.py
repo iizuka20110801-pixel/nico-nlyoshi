@@ -30,31 +30,22 @@ JST = timezone(timedelta(hours=9))
 
 FIELDS = ("contentId,title,description,viewCounter,commentCounter,mylistCounter,"
           "likeCounter,lengthSeconds,thumbnailUrl,startTime,tags,genre")
-
 SORTS = {"view": "-viewCounter", "new": "-startTime",
          "comment": "-commentCounter", "like": "-likeCounter"}
-
 GENRES = ["一般", "エンタメ", "音楽", "スポーツ", "ゲーム", "動物", "料理", "政治",
           "技術", "科学", "手芸", "旅行", "趣味", "アニメ", "映画", "歴史",
           "ニコニコ動画", "その他"]
-
 TERMS = {"24h": 1, "week": 7, "month": 30}
 
 NICO_HEADERS = {
-    "User-Agent": BROWSER_UA,
-    "Accept-Language": "ja-JP,ja;q=0.9",
-    "Accept": "*/*",
-    "X-Frontend-Id": "6",
-    "X-Frontend-Version": "0",
+    "User-Agent": BROWSER_UA, "Accept-Language": "ja-JP,ja;q=0.9", "Accept": "*/*",
+    "X-Frontend-Id": "6", "X-Frontend-Version": "0",
     "X-Request-With": "https://www.nicovideo.jp",
-    "Origin": "https://www.nicovideo.jp",
-    "Referer": "https://www.nicovideo.jp/",
+    "Origin": "https://www.nicovideo.jp", "Referer": "https://www.nicovideo.jp/",
 }
 
-_client = httpx.AsyncClient(timeout=12.0, headers={"User-Agent": UA},
-                            follow_redirects=True)
-_browser = httpx.AsyncClient(timeout=10.0, headers=NICO_HEADERS,
-                             follow_redirects=True)
+_client = httpx.AsyncClient(timeout=12.0, headers={"User-Agent": UA}, follow_redirects=True)
+_browser = httpx.AsyncClient(timeout=10.0, headers=NICO_HEADERS, follow_redirects=True)
 
 _cache = {}
 _locks = {}
@@ -88,9 +79,7 @@ async def warmup():
 
 
 def thumb_url(url):
-    if not url:
-        return ""
-    return "/thumb?u=" + quote(url, safe="")
+    return "/thumb?u=" + quote(url, safe="") if url else ""
 
 
 async def cached(key, ttl, factory):
@@ -114,16 +103,11 @@ async def cached(key, ttl, factory):
 def norm(item):
     cid = item.get("contentId") or ""
     return {
-        "id": cid,
-        "title": item.get("title") or "(無題)",
-        "views": item.get("viewCounter") or 0,
-        "comments": item.get("commentCounter") or 0,
-        "mylists": item.get("mylistCounter") or 0,
-        "likes": item.get("likeCounter") or 0,
-        "seconds": item.get("lengthSeconds") or 0,
-        "start": item.get("startTime"),
-        "genre": item.get("genre"),
-        "tags": (item.get("tags") or "").split(),
+        "id": cid, "title": item.get("title") or "(無題)",
+        "views": item.get("viewCounter") or 0, "comments": item.get("commentCounter") or 0,
+        "mylists": item.get("mylistCounter") or 0, "likes": item.get("likeCounter") or 0,
+        "seconds": item.get("lengthSeconds") or 0, "start": item.get("startTime"),
+        "genre": item.get("genre"), "tags": (item.get("tags") or "").split(),
         "thumb": thumb_url(item.get("thumbnailUrl")),
     }
 
@@ -131,16 +115,11 @@ def norm(item):
 def build_from_nv(video_id, video, tags):
     thumb = video.get("thumbnail") or {}
     return {
-        "id": video_id,
-        "title": video.get("title") or "(無題)",
-        "views": video.get("viewCount") or 0,
-        "comments": video.get("commentCount") or 0,
-        "mylists": video.get("mylistCount") or 0,
-        "likes": 0,
-        "seconds": video.get("lengthSeconds") or 0,
-        "start": video.get("registeredAt"),
-        "genre": None,
-        "tags": tags[:12],
+        "id": video_id, "title": video.get("title") or "(無題)",
+        "views": video.get("viewCount") or 0, "comments": video.get("commentCount") or 0,
+        "mylists": video.get("mylistCount") or 0, "likes": 0,
+        "seconds": video.get("lengthSeconds") or 0, "start": video.get("registeredAt"),
+        "genre": None, "tags": tags[:12],
         "thumb": thumb_url(thumb.get("player") or thumb.get("largeUrl")),
     }
 
@@ -162,26 +141,24 @@ def scan_m3u8(node, out):
     return out
 
 
-async def get_text(url):
-    r = await _browser.get(_via(url))
+async def get_text(url, key=""):
+    r = await _browser.get(_via(url), headers={"X-Access-Right-Key": key} if key else {})
     if r.status_code != 200:
         raise RuntimeError("text " + str(r.status_code))
     return r.text
 
 
-async def get_bytes(url):
-    r = await _browser.get(_via(url))
+async def get_bytes(url, key=""):
+    r = await _browser.get(_via(url), headers={"X-Access-Right-Key": key} if key else {})
     if r.status_code != 200:
         raise RuntimeError("bytes " + str(r.status_code))
     return r.content
 
 
-async def hlsjs() -> bytes:
+async def hlsjs():
     async def run():
         r = await _client.get(HLSJS)
-        if r.status_code != 200:
-            return b""
-        return r.content
+        return r.content if r.status_code == 200 else b""
 
     try:
         return await cached("hlsjs", 86400, run)
@@ -192,15 +169,10 @@ async def hlsjs() -> bytes:
 async def search(keyword, sort="view", genre="", page=1,
                  targets="title,description,tags", filters=None, limit=32):
     page = max(1, page)
-    params = [
-        ("q", keyword),
-        ("targets", targets),
-        ("fields", FIELDS),
-        ("_sort", SORTS.get(sort, "-viewCounter")),
-        ("_offset", str((page - 1) * limit)),
-        ("_limit", str(limit)),
-        ("_context", "nico_viewer_plus"),
-    ]
+    params = [("q", keyword), ("targets", targets), ("fields", FIELDS),
+              ("_sort", SORTS.get(sort, "-viewCounter")),
+              ("_offset", str((page - 1) * limit)), ("_limit", str(limit)),
+              ("_context", "nico_viewer_plus")]
     if genre:
         params.append(("filters[genre][0]", genre))
     for k, v in (filters or []):
@@ -225,10 +197,8 @@ async def fetch_one(video_id):
     async def run():
         r = await _client.get(API, params={
             "q": "", "targets": "title", "fields": FIELDS,
-            "filters[contentId][0]": video_id,
-            "_sort": "-startTime", "_limit": "1",
-            "_context": "nico_viewer_plus",
-        })
+            "filters[contentId][0]": video_id, "_sort": "-startTime",
+            "_limit": "1", "_context": "nico_viewer_plus"})
         r.raise_for_status()
         return r.json()
 
@@ -323,7 +293,6 @@ async def html_probe(video_id):
             track = tm.group(1)
         quality = re.findall(r'"(video-[a-z0-9\-]+)"', text)
         audio = re.findall(r'"(audio-[a-z0-9\-]+)"', text)
-
         if not urls and key and track and quality:
             outputs = [[quality[-1], audio[-1]]] if audio else [[quality[-1]]]
             try:
@@ -338,7 +307,7 @@ async def html_probe(video_id):
                         urls.append(u)
             except Exception:
                 pass
-        return {"url": urls[0] if urls else None, "text": text}
+        return {"url": urls[0] if urls else None, "key": key, "text": text}
 
     try:
         return await cached("h:" + video_id, 240, run)
@@ -375,8 +344,7 @@ def comment_pack(api, video_id):
         return None
     return {
         "threadKey": c.get("threadKey") or "",
-        "params": {"targets": targets, "language": "ja-jp",
-                   "videoId": video_id,
+        "params": {"targets": targets, "language": "ja-jp", "videoId": video_id,
                    "userId": (c.get("keys") or {}).get("userKey") or ""},
         "server": ((c.get("server") or {}).get("url") or NVCOMMENT).rstrip("/"),
     }
@@ -404,7 +372,6 @@ async def fetch_comments(video_id):
         pack = comment_pack(await watch_data(video_id), video_id)
     if not pack:
         return []
-
     key = await thread_key(video_id, pack["threadKey"])
     if not key:
         return []
@@ -435,6 +402,7 @@ async def fetch_comments(video_id):
 async def fetch_stream(video_id):
     api = await guest_watch(video_id) or await nv_watch(video_id)
     urls = []
+    key = None
     pack = comment_pack(api, video_id) if api else None
 
     if api:
@@ -468,55 +436,7 @@ async def fetch_stream(video_id):
         probe = await html_probe(video_id)
         if probe and probe.get("url"):
             urls.append(probe["url"])
+            key = key or probe.get("key")
 
-    return {"url": urls[0] if urls else None,
+    return {"url": urls[0] if urls else None, "key": key,
             "comments": pack if pack and pack.get("threadKey") else None}
-
-
-async def diag(video_id):
-    out = {"relay": RELAY or "(なし)"}
-    try:
-        r = await _browser.get(_via("https://www.nicovideo.jp/"), timeout=8)
-        out["warmup"] = [r.status_code, len(_browser.cookies)]
-    except Exception as e:
-        out["warmup"] = ["ERR", repr(e)[:140]]
-
-    track = "AAAAAAAAAA_" + str(int(time.time() * 1000))
-    for name, url, params in (
-        ("guest", GUEST.format(video_id), {"actionTrackId": track}),
-        ("nvapi", NVAPI.format(video_id), {"actionTrackId": track}),
-        ("watch", WATCH.format(video_id), None),
-    ):
-        try:
-            r = await _browser.get(_via(url), params=params)
-            out[name] = [r.status_code, r.text[:200].replace("\n", " ")]
-        except Exception as e:
-            out[name] = ["ERR", repr(e)[:140]]
-    out["built"] = _via(GUEST.format(video_id))
-    return out
-
-
-async def raw_probe(video_id):
-    await warmup()
-    try:
-        r = await _browser.get(_via(GUEST.format(video_id)), params={
-            "actionTrackId": "AAAAAAAAAA_" + str(int(time.time() * 1000)),
-            "t": str(int(time.time() * 1000))},
-            headers={"X-Client-Os-Type": "others"})
-    except Exception as e:
-        return {"err": repr(e)[:200]}
-    out = {"status": r.status_code, "relay": RELAY or "(なし)"}
-    try:
-        j = r.json()
-    except Exception:
-        out["text"] = r.text[:400]
-        return out
-    d = j.get("data") or {}
-    domand = ((d.get("media") or {}).get("domand")) or {}
-    out["videos"] = [(v.get("id"), v.get("height"), v.get("isAvailable"))
-                     for v in (domand.get("videos") or [])]
-    out["audios"] = [(a.get("id"), a.get("bitRate"), a.get("isAvailable"))
-                     for a in (domand.get("audios") or [])]
-    out["key"] = (domand.get("accessRightKey") or "")[:20]
-    out["track"] = ((d.get("client") or {}).get("watchTrackId") or "")[:30]
-    return out
