@@ -292,6 +292,7 @@
     var routes = [
       ['relay', function () {
         return jget(RELAY + '/v/' + encodeURIComponent(D.id), {}, 20000).then(function (j) {
+          if (j.colo) lg('colo: ' + j.colo);
           if (j.comments && j.comments.length) setComments(j.comments);
           if (j.key) KEY = j.key;
           if (!j.url) throw new Error(j.error || 'URLなし');
