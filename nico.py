@@ -339,7 +339,7 @@ async def html_probe(video_id):
         if tm:
             track = tm.group(1)
         quality = re.findall(r'"(video-[a-z0-9\-]+)"', text)
-        audio = re.findall(r'"(audio-[a-z0-9\-]+)"', text)
+        audio = re.findall(r'"audio-[a-z0-9\-]+"', text)
         if not urls and key and track and quality:
             outputs = [[quality[-1], audio[-1]]] if audio else [[quality[-1]]]
             try:
@@ -474,6 +474,16 @@ async def fetch_stream(video_id):
             except Exception:
                 pass
         scan_m3u8(api, urls)
+
+    if not urls and RELAY:
+        try:
+            r = await _browser.get(RELAY + "/v/" + video_id, timeout=20)
+            j = (r.json() or {}) if r.status_code == 200 else {}
+            if j.get("url"):
+                urls.append(j["url"])
+                key = j.get("key") or key
+        except Exception:
+            pass
 
     if not urls:
         probe = await html_probe(video_id)
