@@ -25,7 +25,7 @@ TERM_LABELS = {"24h": "24時間", "week": "週間", "month": "月間"}
 SHELL = Path("static/watch_shell.html").read_text(encoding="utf-8")
 MP4_DIR = Path("/tmp/mp4")
 MP4_DIR.mkdir(parents=True, exist_ok=True)
-_mp4_locks: dict[str, object] = {}
+_mp4_locks = {}
 
 
 @asynccontextmanager
@@ -42,9 +42,8 @@ templates = Jinja2Templates(directory="templates")
 @app.exception_handler(Exception)
 async def on_error(request: Request, exc: Exception):
     traceback.print_exc()
-    return HTMLResponse(
-        "<h1>500</h1><pre>" + html_lib.escape(repr(exc)) + "</pre>",
-        status_code=500)
+    return HTMLResponse("<h1>500</h1><pre>" + html_lib.escape(repr(exc)) + "</pre>",
+                        status_code=500)
 
 
 def fmt_count(n):
@@ -102,10 +101,8 @@ async def index(request: Request):
 
 
 @app.get("/search", response_class=HTMLResponse)
-async def search_page(request: Request,
-                      q: str = Query("", max_length=120),
-                      sort: str = Query("view"),
-                      genre: str = Query(""),
+async def search_page(request: Request, q: str = Query("", max_length=120),
+                      sort: str = Query("view"), genre: str = Query(""),
                       page: int = Query(1, ge=1, le=200)):
     keyword = q.strip()
     result = await nico.search(keyword, sort=sort, genre=genre, page=page) if keyword \
@@ -116,9 +113,7 @@ async def search_page(request: Request,
 
 
 @app.get("/ranking", response_class=HTMLResponse)
-async def ranking_page(request: Request,
-                       genre: str = Query(""),
-                       term: str = Query("24h")):
+async def ranking_page(request: Request, genre: str = Query(""), term: str = Query("24h")):
     days = nico.TERMS.get(term, 1)
     since = (datetime.now(nico.JST) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%S+09:00")
     result = await nico.search("", sort="view", genre=genre, limit=50,
@@ -142,25 +137,16 @@ async def watch_page(request: Request, video_id: str):
         related = await nico.search(video["tags"][0], targets="tagsExact", limit=12)
 
     data = {
-        "id": video["id"],
-        "title": video["title"],
-        "embed": nico.EMBED.format(video_id),
-        "thumb": video["thumb"],
-        "views": video["views"],
-        "comments": video["comments"],
-        "mylists": video["mylists"],
-        "likes": video["likes"],
-        "start": video["start"],
-        "tags": video["tags"],
-        "relay": nico.RELAY,
+        "id": video["id"], "title": video["title"], "embed": nico.EMBED.format(video_id),
+        "thumb": video["thumb"], "views": video["views"], "comments": video["comments"],
+        "mylists": video["mylists"], "likes": video["likes"], "start": video["start"],
+        "tags": video["tags"], "relay": nico.RELAY,
         "related": [{"id": x["id"], "title": x["title"], "thumb": x["thumb"],
                      "views": x["views"]}
                     for x in related["videos"] if x["id"] != video_id][:12],
     }
     payload = json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
-    page = SHELL.replace("__TITLE__", html_lib.escape(video["title"])) \
-                .replace("__DATA__", payload)
-
+    page = SHELL.replace("__TITLE__", html_lib.escape(video["title"])).replace("__DATA__", payload)
     resp = HTMLResponse(page)
     resp.set_cookie("history", remember(request, video), max_age=60 * 60 * 24 * 90,
                     httponly=True, samesite="lax")
@@ -182,7 +168,7 @@ async def api_comments(video_id: str):
 async def api_brute(video_id: str):
     cid = re.sub(r"[^A-Za-z0-9_]", "", video_id)
     data = await nico.cached("b:" + cid, 240, lambda: nico.fetch_stream(cid))
-    return JSONResponse(data or {"url": None, "comments": None})
+    return JSONResponse(data or {"url": None, "key": None, "comments": None})
 
 
 @app.get("/api/diag/{video_id}")
@@ -199,18 +185,19 @@ async def api_raw(video_id: str):
 
 @app.get("/hlsjs")
 async def hlsjs():
-    body = await nico.hlsjs()
-    return Response(content=body, media_type="application/javascript",
+    return Response(content=await nico.hlsjs(), media_type="application/javascript",
                     headers={"Cache-Control": "public, max-age=86400"})
 
 
 @app.get("/hls")
-async def hls_proxy(u: str = Query(..., max_length=2000)):
+async def hls_proxy(u: str = Query(..., max_length=2000), k: str = Query("", max_length=4000)):
     if not u.startswith("http"):
         return Response(status_code=404)
+    headers = {"Referer": "https://www.nicovideo.jp/"}
+    if k:
+        headers["X-Access-Right-Key"] = k
     try:
-        r = await nico._browser.get(nico._via(u),
-                                    headers={"Referer": "https://www.nicovideo.jp/"})
+        r = await nico._browser.get(nico._via(u), headers=headers)
     except Exception:
         return Response(status_code=502)
     if r.status_code != 200:
@@ -218,20 +205,19 @@ async def hls_proxy(u: str = Query(..., max_length=2000)):
 
     ctype = r.headers.get("content-type", "")
     if "mpegurl" in ctype or u.split("?")[0].endswith(".m3u8"):
+        tail = ("&k=" + quote(k, safe="")) if k else ""
         lines = []
         for line in r.text.splitlines():
             if not line or line.startswith("#"):
                 if 'URI="' in line:
                     pre, _, rest = line.partition('URI="')
-                    inner, _, tail = rest.partition('"')
-                    lines.append(
-                        f'{pre}URI="/hls?u={quote(urljoin(u, inner), safe="")}"{tail}')
+                    inner, _, t2 = rest.partition('"')
+                    lines.append(f'{pre}URI="/hls?u={quote(urljoin(u, inner), safe="")}{tail}"{t2}')
                 else:
                     lines.append(line)
                 continue
-            lines.append("/hls?u=" + quote(urljoin(u, line), safe=""))
-        return Response("\n".join(lines),
-                        media_type="application/vnd.apple.mpegurl",
+            lines.append(f"/hls?u={quote(urljoin(u, line), safe='')}{tail}")
+        return Response("\n".join(lines), media_type="application/vnd.apple.mpegurl",
                         headers={"Cache-Control": "no-store"})
 
     return Response(content=r.content, media_type=ctype or "video/mp2t",
@@ -250,17 +236,18 @@ async def mp4(video_id: str):
         if not (path.exists() and path.stat().st_size > 0):
             info = await nico.fetch_stream(cid)
             url = info.get("url")
+            key = info.get("key") or ""
             if not url:
                 return JSONResponse({"error": "no url"}, status_code=404)
             try:
-                text = await nico.get_text(url)
+                text = await nico.get_text(url, key)
             except Exception:
                 return JSONResponse({"error": "playlist"}, status_code=502)
             if "#EXT-X-STREAM-INF" in text:
                 for line in text.splitlines():
                     if line and not line.startswith("#"):
                         url = urljoin(url, line)
-                        text = await nico.get_text(url)
+                        text = await nico.get_text(url, key)
                         break
             init = None
             m = re.search(r'#EXT-X-MAP:URI="([^"]+)"', text)
@@ -271,15 +258,15 @@ async def mp4(video_id: str):
             if not segs:
                 return JSONResponse({"error": "no segments"}, status_code=502)
             tmp = MP4_DIR / (cid + ".part")
-            with open(tmp, "wb") as f:
-                if init:
-                    f.write(await nico.get_bytes(init))
-                for s in segs:
-                    try:
-                        f.write(await nico.get_bytes(s))
-                    except Exception:
-                        pass
-            tmp.replace(path)
+            try:
+                with open(tmp, "wb") as f:
+                    if init:
+                        f.write(await nico.get_bytes(init, key))
+                    for s in segs:
+                        f.write(await nico.get_bytes(s, key))
+                tmp.replace(path)
+            except Exception as e:
+                return JSONResponse({"error": "download " + repr(e)[:120]}, status_code=502)
 
     return FileResponse(path, media_type="video/mp4")
 
